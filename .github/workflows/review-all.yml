@@ -181,7 +181,7 @@ jobs:
           echo "Запрос Codex опубликован от ${dispatcher}"
 
   analyze-claude:
-    name: Проанализировать PR с Claude Sonnet 4.6
+    name: Проанализировать PR с Claude Sonnet 5
     needs: context
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -266,7 +266,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          marker="<!-- claude-review:${BASE_SHA}:${HEAD_SHA}:claude-sonnet-4-6 -->"
+          marker="<!-- claude-review:${BASE_SHA}:${HEAD_SHA}:claude-sonnet-5 -->"
           reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
           existing="$(jq -r --arg marker "${marker}" \
             '[.[][]? | select(.user.login == "github-actions[bot]" and (.body // "" | contains($marker)))] | first | .id // empty' \
@@ -322,8 +322,8 @@ jobs:
             Для каждого замечания выбери точную изменённую строку diff. Если существенных
             дефектов нет, верни пустой массив `findings`.
           claude_args: |
-            --model claude-sonnet-4-6
-            --effort high
+            --model claude-sonnet-5
+            --effort xhigh
             --max-turns 12
             --bare
             --setting-sources user
@@ -384,7 +384,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          REVIEW_MODEL: claude-sonnet-4-6
+          REVIEW_MODEL: claude-sonnet-5
           REVIEW_JSON: ${{ needs.analyze-claude.outputs.review_json }}
           DIFF_PATH: ${{ github.workspace }}/.review-input/pull-request.diff
         run: |

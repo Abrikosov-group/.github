@@ -9,7 +9,7 @@ const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "ut
 
 test("организационный workflow запускает только Codex и Claude", () => {
   assert.match(workflow, /@codex review/u);
-  assert.match(workflow, /claude-sonnet-4-6/u);
+  assert.match(workflow, /claude-sonnet-5/u);
   assert.doesNotMatch(workflow, /\/gemini\s+review/iu);
   assert.doesNotMatch(workflow, /gemini_url|dispatch-gemini/iu);
 });
@@ -22,10 +22,10 @@ test("Claude использует подписочный OAuth и не може�
   assert.doesNotMatch(workflow, /ANTHROPIC_AUTH_TOKEN:\s*\$\{\{/u);
 });
 
-test("обычное ревью Claude закреплено на Sonnet 4.6 с high", () => {
-  assert.match(workflow, /--model claude-sonnet-4-6/u);
-  assert.match(workflow, /--effort high/u);
-  assert.match(workflow, /REVIEW_MODEL: claude-sonnet-4-6/u);
+test("обычное ревью Claude закреплено на Sonnet 5 с xhigh", () => {
+  assert.match(workflow, /--model claude-sonnet-5/u);
+  assert.match(workflow, /--effort xhigh/u);
+  assert.match(workflow, /REVIEW_MODEL: claude-sonnet-5/u);
 });
 
 test("Claude не получает инструменты записи, shell или сеть", () => {
@@ -45,6 +45,6 @@ test("шаблон слушает комментарии и вызывает ц�
 test("пользовательская документация описывает ровно два ревью", () => {
   assert.match(contributing, /проверку двумя ревьюерами/u);
   assert.doesNotMatch(contributing, /тремя ревьюерами/u);
-  assert.match(pullRequestTemplate, /Codex и Claude Sonnet 4\.6/u);
+  assert.match(pullRequestTemplate, /Codex и Claude Sonnet 5/u);
   assert.doesNotMatch(pullRequestTemplate, /Codex, Claude и Gemini/u);
 });
