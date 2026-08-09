@@ -36,6 +36,14 @@ test("Claude не получает инструменты записи, shell и
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/u);
 });
 
+test("источник команды проверяется без хрупкого сравнения полного API URL", () => {
+  assert.match(workflow, /TRIGGER_ACTOR: \$\{\{ github\.actor \}\}/u);
+  assert.match(workflow, /capture\("\/issues\/\(\?<number>\[1-9\]\[0-9\]\*\)\$"\)/u);
+  assert.match(workflow, /"\$\{comment_author\}" != "\$\{TRIGGER_ACTOR\}"/u);
+  assert.match(workflow, /case "\$\{comment_author_association\}" in/u);
+  assert.doesNotMatch(workflow, /expected_issue_url/u);
+});
+
 test("шаблон слушает комментарии и вызывает центральный workflow", () => {
   assert.match(caller, /issue_comment:/u);
   assert.match(caller, /github\.event\.comment\.body == '\/review-all'/u);
