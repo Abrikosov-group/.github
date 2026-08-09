@@ -18,6 +18,8 @@ test("Claude использует подписочный OAuth и не може�
   assert.match(workflow, /claude_code_oauth_token: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/u);
   assert.match(workflow, /ANTHROPIC_API_KEY: ""/u);
   assert.match(workflow, /ANTHROPIC_AUTH_TOKEN: ""/u);
+  assert.match(workflow, /--safe-mode/u);
+  assert.doesNotMatch(workflow, /--bare/u);
   assert.doesNotMatch(workflow, /ANTHROPIC_API_KEY:\s*\$\{\{/u);
   assert.doesNotMatch(workflow, /ANTHROPIC_AUTH_TOKEN:\s*\$\{\{/u);
 });
