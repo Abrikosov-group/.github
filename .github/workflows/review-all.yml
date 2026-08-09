@@ -211,6 +211,25 @@ jobs:
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
 
     steps:
+      - name: Получить точный Base в защищённый корень
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.context.outputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Проверить checkout Base
+        shell: bash
+        env:
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "${BASE_SHA}" ]]; then
+            echo "::error::Checkout Base не совпадает с зафиксированным SHA"
+            exit 1
+          fi
+
       - name: Подготовить точный diff и снимок Head
         shell: bash
         env:
