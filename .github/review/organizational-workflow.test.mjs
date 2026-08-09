@@ -8,35 +8,65 @@ const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 
 test("организационный workflow запускает только Codex и Claude", () => {
-  assert.match(workflow, /@codex review/u);
+  assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
   assert.match(workflow, /claude-sonnet-5/u);
+  assert.doesNotMatch(workflow, /@codex review/u);
   assert.doesNotMatch(workflow, /\/gemini\s+review/iu);
   assert.doesNotMatch(workflow, /gemini_url|dispatch-gemini/iu);
 });
 
-test("Codex подтверждает завершение ревью для точного Head", () => {
-  assert.match(workflow, /HEAD_SHA: \$\{\{ needs\.context\.outputs\.head_sha \}\}/u);
-  assert.match(workflow, /codex-review-request:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:\$\{COMMENT_ID\}/u);
-  assert.match(workflow, /chatgpt-codex-connector\[bot\]/u);
-  assert.match(workflow, /Codex подтвердил ревью commit \$\{HEAD_SHA\}/u);
-  assert.match(workflow, /Codex не подтвердил ревью commit \$\{HEAD_SHA\}/u);
+test("Codex использует подписочный Spark xhigh на защищённом Runner", () => {
+  assert.match(workflow, /group: codex-spark-review/u);
+  assert.match(workflow, /EXPECTED_RUNNER_NAME: codex-spark-review-187-127-26-1/u);
+  assert.match(workflow, /codex login status/u);
+  assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
+  assert.match(workflow, /model_reasoning_effort="xhigh"/u);
+  assert.match(workflow, /REVIEW_MODEL: gpt-5\.3-codex-spark/u);
+  assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
+  assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
 });
 
-test("точный diff строится локально без лимита GitHub Diff API", () => {
-  assert.match(workflow, /git fetch --no-tags --no-recurse-submodules --depth=1/u);
+test("точный diff строится от доказанного merge base", () => {
+  assert.match(workflow, /git fetch --no-tags --no-recurse-submodules/u);
   assert.match(workflow, /origin "refs\/pull\/\$\{PR_NUMBER\}\/head"/u);
+  assert.match(workflow, /merge_base="\$\(git merge-base "\$\{BASE_SHA\}" "\$\{HEAD_SHA\}"\)"/u);
+  assert.match(workflow, /git merge-base --is-ancestor/u);
   assert.match(workflow, /git diff --binary --find-renames --full-index/u);
+  assert.match(workflow, /"\$\{merge_base\}" "\$\{HEAD_SHA\}"/u);
   assert.doesNotMatch(workflow, /application\/vnd\.github\.diff/u);
 });
 
 test("исполняемый организационный код закреплён полными SHA", () => {
   assert.doesNotMatch(workflow, /\n\s+ref: main\s*$/mu);
-  assert.match(workflow, /repository: Abrikosov-group\/\.github[\s\S]*?ref: [0-9a-f]{40}/u);
+  assert.match(workflow, /repository: \$\{\{ job\.workflow_repository \}\}/u);
+  assert.match(workflow, /ref: \$\{\{ job\.workflow_sha \}\}/u);
   assert.match(
     caller,
     /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
   );
   assert.doesNotMatch(caller, /review-all\.yml@main/u);
+});
+
+test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
+  const codexJob = workflow.match(/\n  analyze-codex:[\s\S]*?(?=\n  publish-codex:)/u)?.[0];
+
+  assert.ok(codexJob);
+  assert.match(codexJob, /permissions: \{\}/u);
+  assert.match(codexJob, /env -i/u);
+  assert.match(codexJob, /--ignore-user-config/u);
+  assert.match(codexJob, /--ignore-rules/u);
+  assert.match(codexJob, /--disable shell_tool/u);
+  assert.match(codexJob, /--disable plugins/u);
+  assert.doesNotMatch(codexJob, /actions\/checkout/u);
+  assert.doesNotMatch(codexJob, /GH_TOKEN|GITHUB_TOKEN/u);
+});
+
+test("Codex публикуется только после схемы и доверенного издателя", () => {
+  assert.match(workflow, /--output-schema "\$\{schema_path\}"/u);
+  assert.match(workflow, /--output-last-message "\$\{result_path\}"/u);
+  assert.match(workflow, /REVIEW_JSON_FILE:/u);
+  assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:gpt-5\.3-codex-spark/u);
+  assert.match(workflow, /node _review_infra\/\.github\/review\/publish-claude-review\.mjs/u);
 });
 
 test("Claude использует подписочный OAuth и не может перейти на API-ключ", () => {
@@ -93,13 +123,13 @@ test("шаблон слушает комментарии и вызывает ц�
     caller,
     /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
   );
-  assert.match(caller, /REVIEW_DISPATCH_TOKEN: \$\{\{ secrets\.REVIEW_DISPATCH_TOKEN \}\}/u);
+  assert.doesNotMatch(caller, /REVIEW_DISPATCH_TOKEN/u);
   assert.match(caller, /CLAUDE_CODE_OAUTH_TOKEN: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/u);
 });
 
 test("пользовательская документация описывает ровно два ревью", () => {
   assert.match(contributing, /проверку двумя ревьюерами/u);
   assert.doesNotMatch(contributing, /тремя ревьюерами/u);
-  assert.match(pullRequestTemplate, /Codex и Claude Sonnet 5/u);
+  assert.match(pullRequestTemplate, /GPT-5\.3-Codex-Spark и Claude Sonnet 5/u);
   assert.doesNotMatch(pullRequestTemplate, /Codex, Claude и Gemini/u);
 });

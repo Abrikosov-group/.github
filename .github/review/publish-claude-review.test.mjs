@@ -20,6 +20,7 @@ const BASE_SHA = "1".repeat(40);
 const HEAD_SHA = "2".repeat(40);
 const STANDARD_MODEL = "claude-sonnet-5";
 const DEEP_MODEL = "claude-opus-5";
+const SPARK_MODEL = "gpt-5.3-codex-spark";
 
 function fileDiff({ oldPath = "src/example.ts", newPath = "src/example.ts", hunk }) {
   return [
@@ -259,6 +260,50 @@ test("различает обычное и углублённое ревью о�
     () => reviewMarker(BASE_SHA, HEAD_SHA, "claude-unknown-5"),
     /REVIEW_MODEL/u,
   );
+});
+
+test("создаёт отдельное русское ревью GPT-5.3-Codex-Spark", () => {
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, SPARK_MODEL);
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, SPARK_MODEL);
+
+  assert.match(marker, /^<!-- codex-review:/u);
+  assert.ok(payload.body.startsWith(marker));
+  assert.match(payload.body, /### Ревью Codex/u);
+  assert.match(payload.body, /GPT-5\.3-Codex-Spark, усилие `xhigh`/u);
+  assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
+});
+
+test("читает структурированный результат Codex из доверенного файла", async () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-json-"));
+  const reviewPath = join(temporaryDirectory, "review.json");
+  writeFileSync(reviewPath, JSON.stringify({ findings: [] }));
+  const calls = [];
+  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+
+  try {
+    await runMainWithFetch(async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (calls.length === 1 || calls.length === 3 || calls.length === 5) {
+        return jsonResponse(currentPullRequest);
+      }
+      if (calls.length === 2) {
+        return jsonResponse([]);
+      }
+      return jsonResponse({
+        id: 46,
+        html_url: "https://github.com/example/sawabook/pull/55#spark-review",
+      });
+    }, {
+      REVIEW_MODEL: SPARK_MODEL,
+      REVIEW_JSON: "",
+      REVIEW_JSON_FILE: reviewPath,
+    });
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+
+  const payload = JSON.parse(calls[3].options.body);
+  assert.match(payload.body, /GPT-5\.3-Codex-Spark/u);
 });
 
 test("до запуска Claude пропускает дубликат и устаревшее событие", async () => {

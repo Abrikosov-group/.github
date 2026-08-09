@@ -10,8 +10,21 @@ const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const REVIEW_MODELS = new Map([
-  ["claude-sonnet-5", "Claude Sonnet 5"],
-  ["claude-opus-5", "Claude Opus 5"],
+  ["claude-sonnet-5", {
+    displayName: "Claude Sonnet 5",
+    marker: "claude-review",
+    reviewer: "Claude",
+  }],
+  ["claude-opus-5", {
+    displayName: "Claude Opus 5",
+    marker: "claude-review",
+    reviewer: "Claude",
+  }],
+  ["gpt-5.3-codex-spark", {
+    displayName: "GPT-5.3-Codex-Spark",
+    marker: "codex-review",
+    reviewer: "Codex",
+  }],
 ]);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 const HIDDEN_CONTENT_PATTERN = /<!--|-->|[\u200b-\u200f\u2060\ufeff]/iu;
@@ -107,11 +120,11 @@ export function validateReviewJson(rawReview) {
   try {
     review = typeof rawReview === "string" ? JSON.parse(rawReview) : rawReview;
   } catch {
-    throw new Error("Claude вернул некорректный JSON.");
+    throw new Error("ИИ-ревьюер вернул некорректный JSON.");
   }
 
-  assertPlainObject(review, "Результат Claude");
-  assertExactKeys(review, ["findings"], "Результат Claude");
+  assertPlainObject(review, "Результат ИИ-ревью");
+  assertExactKeys(review, ["findings"], "Результат ИИ-ревью");
 
   if (!Array.isArray(review.findings) || review.findings.length > MAX_FINDINGS) {
     throw new Error(`Поле findings должно быть массивом не более чем из ${MAX_FINDINGS} элементов.`);
@@ -269,12 +282,16 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
     throw new Error("Base SHA и Head SHA должны быть полными commit SHA.");
   }
   if (!REVIEW_MODELS.has(reviewModel)) {
-    throw new Error("REVIEW_MODEL должен быть claude-sonnet-5 или claude-opus-5.");
+    throw new Error(
+      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5 или gpt-5.3-codex-spark.",
+    );
   }
-  return `<!-- claude-review:${baseSha}:${headSha}:${reviewModel} -->`;
+  return `<!-- ${REVIEW_MODELS.get(reviewModel).marker}:${baseSha}:${headSha}:${reviewModel} -->`;
 }
 
 export function buildReviewPayload(review, baseSha, headSha, reviewModel) {
+  const model = REVIEW_MODELS.get(reviewModel);
+  reviewMarker(baseSha, headSha, reviewModel);
   const counts = { P0: 0, P1: 0, P2: 0 };
   for (const finding of review.findings) {
     counts[finding.priority] += 1;
@@ -288,9 +305,9 @@ export function buildReviewPayload(review, baseSha, headSha, reviewModel) {
     commit_id: headSha,
     body: [
       reviewMarker(baseSha, headSha, reviewModel),
-      "### Ревью Claude",
+      `### Ревью ${model.reviewer}`,
       "",
-      `**Модель:** ${REVIEW_MODELS.get(reviewModel)}, усилие \`xhigh\`.`,
+      `**Модель:** ${model.displayName}, усилие \`xhigh\`.`,
       "",
       summary,
       "",
@@ -307,9 +324,11 @@ export function buildReviewPayload(review, baseSha, headSha, reviewModel) {
 }
 
 export function buildStaleReviewBody(baseSha, headSha, reviewModel) {
+  const model = REVIEW_MODELS.get(reviewModel);
+  reviewMarker(baseSha, headSha, reviewModel);
   return [
     reviewMarker(baseSha, headSha, reviewModel),
-    "### ⚠️ Ревью Claude устарело",
+    `### ⚠️ Ревью ${model.reviewer} устарело`,
     "",
     "Head PR изменился во время публикации. Не используйте замечания этого ревью для текущей версии кода.",
     "",
@@ -342,7 +361,7 @@ async function githubRequest(path, { method = "GET", body, token } = {}) {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
-      "User-Agent": "abrikosov-group-organizational-claude-review",
+      "User-Agent": "abrikosov-group-organizational-ai-review",
       "X-GitHub-Api-Version": "2026-03-10",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -433,7 +452,10 @@ export async function main() {
   const headSha = requireEnvironment("HEAD_SHA");
   const token = requireEnvironment("GH_TOKEN");
   const reviewModel = requireEnvironment("REVIEW_MODEL");
-  const review = validateReviewJson(requireEnvironment("REVIEW_JSON"));
+  const rawReview = process.env.REVIEW_JSON_FILE
+    ? readFileSync(process.env.REVIEW_JSON_FILE, "utf8")
+    : requireEnvironment("REVIEW_JSON");
+  const review = validateReviewJson(rawReview);
 
   if (!/^[1-9]\d*$/u.test(rawPullNumber)) {
     throw new Error("PR_NUMBER должен быть положительным целым числом.");
