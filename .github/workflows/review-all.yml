@@ -143,11 +143,11 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   dispatch-codex:
-    name: Запустить Codex Review
+    name: Запустить и подтвердить Codex Review
     needs: context
     if: inputs.command == '/review-all'
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
@@ -155,10 +155,12 @@ jobs:
       REPOSITORY: ${{ inputs.repository }}
       PR_NUMBER: ${{ inputs.pr_number }}
       COMMENT_ID: ${{ inputs.comment_id }}
-      CODEX_REQUEST: "@codex review на русском языке: опубликуй итог, заголовки и все замечания на русском; идентификаторы и код оставь без перевода."
+      BASE_SHA: ${{ needs.context.outputs.base_sha }}
+      HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+      CODEX_BOT: chatgpt-codex-connector[bot]
 
     steps:
-      - name: Отправить идемпотентный запрос Codex
+      - name: Отправить запрос и дождаться ревью точного Head
         shell: bash
         run: |
           set -euo pipefail
@@ -177,22 +179,68 @@ jobs:
               ;;
           esac
 
+          marker="<!-- codex-review-request:${BASE_SHA}:${HEAD_SHA}:${COMMENT_ID} -->"
+          request_body="@codex review на русском языке: проверь именно commit \`${HEAD_SHA}\`; опубликуй итог, заголовки и все замечания на русском; идентификаторы и код оставь без перевода. ${marker}"
           comments="$(gh api --paginate --slurp "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
-          existing="$(jq -r \
+          request_id="$(jq -r \
             --arg dispatcher "${dispatcher}" \
-            --arg body "${CODEX_REQUEST}" \
+            --arg marker "${marker}" \
             --argjson command_id "${COMMENT_ID}" \
-            '[.[][]? | select(.user.login == $dispatcher and .body == $body and .id > $command_id)] | first | .id // empty' \
+            '[.[][]? | select(
+              .user.login == $dispatcher and
+              .id > $command_id and
+              ((.body // "") | contains($marker))
+            )] | first | .id // empty' \
             <<< "${comments}")"
-          if [[ -n "${existing}" ]]; then
-            echo "Запрос Codex для этой команды уже опубликован: ${existing}"
-            exit 0
+          if [[ -z "${request_id}" ]]; then
+            request_id="$(gh api --method POST \
+              "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --raw-field body="${request_body}" \
+              --jq .id)"
+            echo "Запрос Codex опубликован от ${dispatcher}: ${request_id}"
+          else
+            echo "Повторно используется запрос Codex: ${request_id}"
           fi
 
-          gh api --method POST \
-            "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
-            --raw-field body="${CODEX_REQUEST}" > /dev/null
-          echo "Запрос Codex опубликован от ${dispatcher}"
+          expected_short_sha="${HEAD_SHA:0:10}"
+          for _ in $(seq 1 60); do
+            comments="$(gh api --paginate --slurp "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
+            response_url="$(jq -r \
+              --arg bot "${CODEX_BOT}" \
+              --arg short_sha "${expected_short_sha}" \
+              --argjson request_id "${request_id}" \
+              '[.[][]? | select(
+                .user.login == $bot and
+                .id > $request_id and
+                ((.body // "") | contains($short_sha))
+              )] | first | .html_url // empty' \
+              <<< "${comments}")"
+
+            if [[ -z "${response_url}" ]]; then
+              reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
+              response_url="$(jq -r \
+                --arg bot "${CODEX_BOT}" \
+                --arg head_sha "${HEAD_SHA}" \
+                '[.[][]? | select(.user.login == $bot and .commit_id == $head_sha)] | first | .html_url // empty' \
+                <<< "${reviews}")"
+            fi
+
+            if [[ -n "${response_url}" ]]; then
+              echo "Codex подтвердил ревью commit ${HEAD_SHA}: ${response_url}"
+              {
+                echo "### Codex Review подтверждено"
+                echo
+                echo "- Head: \`${HEAD_SHA}\`"
+                echo "- Результат: ${response_url}"
+              } >> "${GITHUB_STEP_SUMMARY}"
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "::error::Codex не подтвердил ревью commit ${HEAD_SHA} за 15 минут"
+          exit 1
 
   analyze-claude:
     name: Проанализировать PR с Claude Sonnet 5
@@ -248,10 +296,17 @@ jobs:
             exit 1
           fi
 
+          gh auth setup-git
+          git fetch --no-tags --no-recurse-submodules --depth=1 \
+            origin "refs/pull/${PR_NUMBER}/head"
+          if [[ "$(git rev-parse FETCH_HEAD)" != "${HEAD_SHA}" ]]; then
+            echo "::error::Полученный Head не совпадает с зафиксированным SHA"
+            exit 1
+          fi
+
           mkdir -p "${GITHUB_WORKSPACE}/.review-input"
-          gh api \
-            -H 'Accept: application/vnd.github.diff' \
-            "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
+          git diff --binary --find-renames --full-index \
+            "${BASE_SHA}" "${HEAD_SHA}" -- \
             > "${GITHUB_WORKSPACE}/.review-input/pull-request.diff"
           diff_size="$(wc -c < "${GITHUB_WORKSPACE}/.review-input/pull-request.diff")"
           if (( diff_size > 5242880 )); then
@@ -378,6 +433,14 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Получить точный Base для публикации
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.context.outputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Получить точный diff для публикации
         shell: bash
         env:
@@ -395,17 +458,26 @@ jobs:
             echo "::error::Base или Head PR изменился до публикации"
             exit 1
           fi
+
+          gh auth setup-git
+          git fetch --no-tags --no-recurse-submodules --depth=1 \
+            origin "refs/pull/${PR_NUMBER}/head"
+          if [[ "$(git rev-parse FETCH_HEAD)" != "${HEAD_SHA}" ]]; then
+            echo "::error::Полученный Head не совпадает с зафиксированным SHA"
+            exit 1
+          fi
+
           mkdir -p "${GITHUB_WORKSPACE}/.review-input"
-          gh api \
-            -H 'Accept: application/vnd.github.diff' \
-            "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
+          git diff --binary --find-renames --full-index \
+            "${BASE_SHA}" "${HEAD_SHA}" -- \
             > "${GITHUB_WORKSPACE}/.review-input/pull-request.diff"
 
       - name: Получить доверенный издатель из организации
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Abrikosov-group/.github
-          ref: main
+          # Издатель исполняется с pull-requests: write и поэтому закреплён SHA.
+          ref: e2ec0cc775826fabfbe659d4f6a774ba92ac1c26
           path: _review_infra
           fetch-depth: 1
           persist-credentials: false

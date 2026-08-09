@@ -14,6 +14,31 @@ test("организационный workflow запускает только Co
   assert.doesNotMatch(workflow, /gemini_url|dispatch-gemini/iu);
 });
 
+test("Codex подтверждает завершение ревью для точного Head", () => {
+  assert.match(workflow, /HEAD_SHA: \$\{\{ needs\.context\.outputs\.head_sha \}\}/u);
+  assert.match(workflow, /codex-review-request:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:\$\{COMMENT_ID\}/u);
+  assert.match(workflow, /chatgpt-codex-connector\[bot\]/u);
+  assert.match(workflow, /Codex подтвердил ревью commit \$\{HEAD_SHA\}/u);
+  assert.match(workflow, /Codex не подтвердил ревью commit \$\{HEAD_SHA\}/u);
+});
+
+test("точный diff строится локально без лимита GitHub Diff API", () => {
+  assert.match(workflow, /git fetch --no-tags --no-recurse-submodules --depth=1/u);
+  assert.match(workflow, /origin "refs\/pull\/\$\{PR_NUMBER\}\/head"/u);
+  assert.match(workflow, /git diff --binary --find-renames --full-index/u);
+  assert.doesNotMatch(workflow, /application\/vnd\.github\.diff/u);
+});
+
+test("исполняемый организационный код закреплён полными SHA", () => {
+  assert.doesNotMatch(workflow, /\n\s+ref: main\s*$/mu);
+  assert.match(workflow, /repository: Abrikosov-group\/\.github[\s\S]*?ref: [0-9a-f]{40}/u);
+  assert.match(
+    caller,
+    /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
+  );
+  assert.doesNotMatch(caller, /review-all\.yml@main/u);
+});
+
 test("Claude использует подписочный OAuth и не может перейти на API-ключ", () => {
   assert.match(workflow, /claude_code_oauth_token: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/u);
   assert.match(workflow, /ANTHROPIC_API_KEY: ""/u);
@@ -64,7 +89,10 @@ test("источник команды проверяется без хрупко
 test("шаблон слушает комментарии и вызывает центральный workflow", () => {
   assert.match(caller, /issue_comment:/u);
   assert.match(caller, /github\.event\.comment\.body == '\/review-all'/u);
-  assert.match(caller, /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@main/u);
+  assert.match(
+    caller,
+    /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
+  );
   assert.match(caller, /REVIEW_DISPATCH_TOKEN: \$\{\{ secrets\.REVIEW_DISPATCH_TOKEN \}\}/u);
   assert.match(caller, /CLAUDE_CODE_OAUTH_TOKEN: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/u);
 });
