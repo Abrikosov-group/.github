@@ -325,7 +325,7 @@ jobs:
             --model claude-sonnet-5
             --effort xhigh
             --max-turns 12
-            --bare
+            --safe-mode
             --setting-sources user
             --permission-mode dontAsk
             --tools "Read"
