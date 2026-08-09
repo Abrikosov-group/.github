@@ -36,6 +36,23 @@ test("Claude не получает инструменты записи, shell и
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/u);
 });
 
+test("Claude запускается из точного доверенного Base checkout", () => {
+  const baseCheckout = workflow.match(
+    /- name: Получить точный Base в защищённый корень[\s\S]*?(?=\n      - name:)/u,
+  )?.[0];
+
+  assert.ok(baseCheckout);
+  assert.match(baseCheckout, /repository: \$\{\{ inputs\.repository \}\}/u);
+  assert.match(baseCheckout, /ref: \$\{\{ needs\.context\.outputs\.base_sha \}\}/u);
+  assert.match(baseCheckout, /persist-credentials: false/u);
+  assert.doesNotMatch(baseCheckout, /\n\s+path:/u);
+  assert.match(workflow, /"\$\(git rev-parse HEAD\)" != "\$\{BASE_SHA\}"/u);
+  assert.ok(
+    workflow.indexOf("Получить точный Base в защищённый корень") <
+      workflow.indexOf("Выполнить изолированное review-only ревью"),
+  );
+});
+
 test("источник команды проверяется без хрупкого сравнения полного API URL", () => {
   assert.match(workflow, /TRIGGER_ACTOR: \$\{\{ github\.actor \}\}/u);
   assert.match(workflow, /capture\("\/issues\/\(\?<number>\[1-9\]\[0-9\]\*\)\$"\)/u);
