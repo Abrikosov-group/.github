@@ -18,8 +18,8 @@ import {
 
 const BASE_SHA = "1".repeat(40);
 const HEAD_SHA = "2".repeat(40);
-const STANDARD_MODEL = "claude-sonnet-4-6";
-const DEEP_MODEL = "claude-opus-4-7";
+const STANDARD_MODEL = "claude-sonnet-5";
+const DEEP_MODEL = "claude-opus-5";
 
 function fileDiff({ oldPath = "src/example.ts", newPath = "src/example.ts", hunk }) {
   return [
@@ -231,7 +231,7 @@ test("создаёт одно review с итогом и inline comments", () => 
   assert.equal(payload.commit_id, HEAD_SHA);
   assert.match(payload.body, /P0 — 0, P1 — 1, P2 — 0/u);
   assert.ok(payload.body.startsWith(reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL)));
-  assert.match(payload.body, /Claude Sonnet 4\.6, усилие `high`/u);
+  assert.match(payload.body, /Claude Sonnet 5, усилие `xhigh`/u);
   assert.deepEqual(payload.comments, [
     {
       path: "src/example.ts",
@@ -254,7 +254,7 @@ test("различает обычное и углублённое ревью о�
   const deepPayload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, DEEP_MODEL);
 
   assert.notEqual(standardMarker, deepMarker);
-  assert.match(deepPayload.body, /Claude Opus 4\.7, усилие `xhigh`/u);
+  assert.match(deepPayload.body, /Claude Opus 5, усилие `xhigh`/u);
   assert.throws(
     () => reviewMarker(BASE_SHA, HEAD_SHA, "claude-unknown-5"),
     /REVIEW_MODEL/u,
@@ -413,7 +413,7 @@ test("публикует Opus после Sonnet для того же diff", asyn
   assert.equal(calls.length, 5);
   const payload = JSON.parse(calls[3].options.body);
   assert.ok(payload.body.startsWith(reviewMarker(BASE_SHA, HEAD_SHA, DEEP_MODEL)));
-  assert.match(payload.body, /Claude Opus 4\.7/u);
+  assert.match(payload.body, /Claude Opus 5/u);
 });
 
 test("помечает опубликованное ревью устаревшим при гонке Head SHA", async () => {

@@ -8,7 +8,7 @@
 двойное ревью pull request:
 
 - Codex Review через установленный GitHub Connector;
-- Claude Sonnet 4.6 с усилием `high` через подписочный OAuth Claude Code.
+- Claude Sonnet 5 с усилием `xhigh` через подписочный OAuth Claude Code.
 
 Gemini и платные API-ключи моделей не используются.
 
