@@ -1,0 +1,8 @@
+{
+  "name": "Двойное ИИ-ревью Codex и Claude",
+  "description": "Подключает организационные команды /review-all и /review-claude без Gemini и API-ключей моделей.",
+  "iconName": "octicon code-review",
+  "categories": [
+    "Automation"
+  ]
+}
