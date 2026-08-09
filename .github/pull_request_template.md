@@ -17,5 +17,5 @@
 - [ ] После последнего коммита запущена команда `/review-all`.
 - [ ] Существенные замечания ревьюеров проверены и обработаны.
 
-> `/review-all` запускает Codex и Claude Sonnet 5 (`xhigh`). Для отдельного
+> `/review-all` запускает GPT-5.3-Codex-Spark и Claude Sonnet 5 (`xhigh`). Для отдельного
 > повторного запуска Claude используйте `/review-claude`.

@@ -22,7 +22,8 @@ jobs:
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'
       )
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@main
+    # Обновляйте SHA только отдельным PR после проверки центрального workflow.
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@989a048f0f2d9d636aed42185e22d7e0a8ae4bf9
     with:
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
@@ -30,5 +31,4 @@ jobs:
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
     secrets:
-      REVIEW_DISPATCH_TOKEN: ${{ secrets.REVIEW_DISPATCH_TOKEN }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
