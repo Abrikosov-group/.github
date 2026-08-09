@@ -21,6 +21,7 @@ test("Codex использует подписочный Spark xhigh на защ�
   assert.match(workflow, /codex login status/u);
   assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
   assert.match(workflow, /model_reasoning_effort="xhigh"/u);
+  assert.match(workflow, /web_search="disabled"/u);
   assert.match(workflow, /REVIEW_MODEL: gpt-5\.3-codex-spark/u);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
   assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
