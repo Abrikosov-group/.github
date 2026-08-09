@@ -10,8 +10,8 @@ const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const REVIEW_MODELS = new Map([
-  ["claude-sonnet-4-6", { label: "Claude Sonnet 4.6", effort: "high" }],
-  ["claude-opus-4-7", { label: "Claude Opus 4.7", effort: "xhigh" }],
+  ["claude-sonnet-5", "Claude Sonnet 5"],
+  ["claude-opus-5", "Claude Opus 5"],
 ]);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 const HIDDEN_CONTENT_PATTERN = /<!--|-->|[\u200b-\u200f\u2060\ufeff]/iu;
@@ -269,13 +269,12 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
     throw new Error("Base SHA и Head SHA должны быть полными commit SHA.");
   }
   if (!REVIEW_MODELS.has(reviewModel)) {
-    throw new Error("REVIEW_MODEL должен быть claude-sonnet-4-6 или claude-opus-4-7.");
+    throw new Error("REVIEW_MODEL должен быть claude-sonnet-5 или claude-opus-5.");
   }
   return `<!-- claude-review:${baseSha}:${headSha}:${reviewModel} -->`;
 }
 
 export function buildReviewPayload(review, baseSha, headSha, reviewModel) {
-  const model = REVIEW_MODELS.get(reviewModel);
   const counts = { P0: 0, P1: 0, P2: 0 };
   for (const finding of review.findings) {
     counts[finding.priority] += 1;
@@ -291,7 +290,7 @@ export function buildReviewPayload(review, baseSha, headSha, reviewModel) {
       reviewMarker(baseSha, headSha, reviewModel),
       "### Ревью Claude",
       "",
-      `**Модель:** ${model.label}, усилие \`${model.effort}\`.`,
+      `**Модель:** ${REVIEW_MODELS.get(reviewModel)}, усилие \`xhigh\`.`,
       "",
       summary,
       "",
