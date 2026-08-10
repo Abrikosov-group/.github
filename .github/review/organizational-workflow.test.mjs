@@ -152,6 +152,7 @@ test("автоматический источник закрепляет точ�
 test("шаблон запускает ревью автоматически и оставляет ручной повтор", () => {
   assert.match(caller, /issue_comment:/u);
   assert.match(caller, /pull_request_target:/u);
+  assert.match(caller, /opened/u);
   assert.match(caller, /ready_for_review/u);
   assert.match(caller, /synchronize/u);
   assert.match(caller, /reopened/u);
@@ -171,6 +172,7 @@ test("шаблон запускает ревью автоматически и �
 test("центральный репозиторий сам слушает команду и новые снимки PR", () => {
   assert.match(organizationCaller, /issue_comment:/u);
   assert.match(organizationCaller, /pull_request_target:/u);
+  assert.match(organizationCaller, /opened/u);
   assert.match(organizationCaller, /github\.event\.comment\.body == '\/review-all'/u);
   assert.match(organizationCaller, /ready_for_review/u);
   assert.match(organizationCaller, /synchronize/u);

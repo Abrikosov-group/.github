@@ -5,7 +5,7 @@ name: Организационное двойное ИИ-ревью
     types: [created]
   pull_request_target:
     branches: [main]
-    types: [ready_for_review, synchronize, reopened]
+    types: [opened, ready_for_review, synchronize, reopened]
 
 permissions:
   contents: read
@@ -25,7 +25,7 @@ jobs:
         github.event.comment.author_association == 'COLLABORATOR'
       )
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@890d6c872e5f47a7846feeb087ba095ca0568ed1
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@3d8dd49fc1711af3a1dcfb83cafdff9662a217c0
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
@@ -44,7 +44,7 @@ jobs:
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@890d6c872e5f47a7846feeb087ba095ca0568ed1
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@3d8dd49fc1711af3a1dcfb83cafdff9662a217c0
     with:
       trigger: automatic
       command: /review-all
