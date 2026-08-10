@@ -4,6 +4,7 @@ import test from "node:test";
 
 const workflow = readFileSync(".github/workflows/review-all.yml", "utf8");
 const caller = readFileSync("workflow-templates/review-all.yml", "utf8");
+const organizationCaller = readFileSync(".github/workflows/review-all-trigger.yml", "utf8");
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 
@@ -46,7 +47,12 @@ test("исполняемый организационный код закреп�
     caller,
     /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
   );
+  assert.match(
+    organizationCaller,
+    /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
+  );
   assert.doesNotMatch(caller, /review-all\.yml@main/u);
+  assert.doesNotMatch(organizationCaller, /review-all\.yml@main/u);
 });
 
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
@@ -160,6 +166,19 @@ test("шаблон запускает ревью автоматически и �
   );
   assert.doesNotMatch(caller, /REVIEW_DISPATCH_TOKEN/u);
   assert.match(caller, /CLAUDE_CODE_OAUTH_TOKEN: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/u);
+});
+
+test("центральный репозиторий сам слушает команду и новые снимки PR", () => {
+  assert.match(organizationCaller, /issue_comment:/u);
+  assert.match(organizationCaller, /pull_request_target:/u);
+  assert.match(organizationCaller, /github\.event\.comment\.body == '\/review-all'/u);
+  assert.match(organizationCaller, /ready_for_review/u);
+  assert.match(organizationCaller, /synchronize/u);
+  assert.match(organizationCaller, /reopened/u);
+  assert.match(organizationCaller, /trigger: manual/u);
+  assert.match(organizationCaller, /trigger: automatic/u);
+  assert.doesNotMatch(organizationCaller, /\/review-claude/u);
+  assert.doesNotMatch(organizationCaller, /Gemini/iu);
 });
 
 test("workflow сразу показывает запуск и обновляет единый статусный комментарий", () => {

@@ -5,6 +5,7 @@ name: Проверка инфраструктуры ИИ-ревью
     paths:
       - ".github/review/**"
       - ".github/workflows/review-all.yml"
+      - ".github/workflows/review-all-trigger.yml"
       - ".github/workflows/review-infrastructure-ci.yml"
       - ".github/pull_request_template.md"
       - "workflow-templates/review-all.yml"
@@ -16,6 +17,7 @@ name: Проверка инфраструктуры ИИ-ревью
     paths:
       - ".github/review/**"
       - ".github/workflows/review-all.yml"
+      - ".github/workflows/review-all-trigger.yml"
       - ".github/workflows/review-infrastructure-ci.yml"
       - ".github/pull_request_template.md"
       - "workflow-templates/review-all.yml"

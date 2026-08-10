@@ -1,4 +1,4 @@
-name: Организационное двойное ИИ-ревью
+name: Запуск организационного двойного ИИ-ревью
 
 "on":
   issue_comment:
@@ -24,7 +24,6 @@ jobs:
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'
       )
-    # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@890d6c872e5f47a7846feeb087ba095ca0568ed1
     with:
       trigger: manual
@@ -43,7 +42,6 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@890d6c872e5f47a7846feeb087ba095ca0568ed1
     with:
       trigger: automatic
