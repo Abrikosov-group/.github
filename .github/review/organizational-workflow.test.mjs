@@ -13,6 +13,7 @@ test("организационный workflow запускает только Co
   assert.doesNotMatch(workflow, /@codex review/u);
   assert.doesNotMatch(workflow, /\/gemini\s+review/iu);
   assert.doesNotMatch(workflow, /gemini_url|dispatch-gemini/iu);
+  assert.doesNotMatch(workflow, /\/review-claude/u);
 });
 
 test("Codex использует подписочный Spark xhigh на защищённом Runner", () => {
@@ -84,6 +85,7 @@ test("обычное ревью Claude закреплено на Sonnet 5 с xhi
   assert.match(workflow, /--model claude-sonnet-5/u);
   assert.match(workflow, /--effort xhigh/u);
   assert.match(workflow, /REVIEW_MODEL: claude-sonnet-5/u);
+  assert.doesNotMatch(workflow, /--max-turns/u);
 });
 
 test("Claude не получает инструменты записи, shell или сеть", () => {
@@ -109,7 +111,7 @@ test("Claude запускается из точного доверенного B
   );
 });
 
-test("источник команды проверяется без хрупкого сравнения полного API URL", () => {
+test("ручной источник проверяется без хрупкого сравнения полного API URL", () => {
   assert.match(workflow, /TRIGGER_ACTOR: \$\{\{ github\.actor \}\}/u);
   assert.match(workflow, /capture\("\/issues\/\(\?<number>\[1-9\]\[0-9\]\*\)\$"\)/u);
   assert.match(workflow, /"\$\{comment_author\}" != "\$\{TRIGGER_ACTOR\}"/u);
@@ -117,9 +119,26 @@ test("источник команды проверяется без хрупко
   assert.doesNotMatch(workflow, /expected_issue_url/u);
 });
 
-test("шаблон слушает комментарии и вызывает центральный workflow", () => {
+test("автоматический источник закрепляет точный Head готового PR", () => {
+  assert.match(workflow, /EVENT_NAME: \$\{\{ github\.event_name \}\}/u);
+  assert.match(workflow, /ready_for_review\|synchronize\|reopened/u);
+  assert.match(workflow, /event_head_repository/u);
+  assert.match(workflow, /event_draft/u);
+  assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
+  assert.match(workflow, /cancel-in-progress: true/u);
+});
+
+test("шаблон запускает ревью автоматически и оставляет ручной повтор", () => {
   assert.match(caller, /issue_comment:/u);
+  assert.match(caller, /pull_request_target:/u);
+  assert.match(caller, /ready_for_review/u);
+  assert.match(caller, /synchronize/u);
+  assert.match(caller, /reopened/u);
   assert.match(caller, /github\.event\.comment\.body == '\/review-all'/u);
+  assert.match(caller, /trigger: manual/u);
+  assert.match(caller, /trigger: automatic/u);
+  assert.match(caller, /expected_head_sha: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
+  assert.doesNotMatch(caller, /\/review-claude/u);
   assert.match(
     caller,
     /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
@@ -131,6 +150,8 @@ test("шаблон слушает комментарии и вызывает ц�
 test("пользовательская документация описывает ровно два ревью", () => {
   assert.match(contributing, /проверку двумя ревьюерами/u);
   assert.doesNotMatch(contributing, /тремя ревьюерами/u);
+  assert.match(contributing, /после каждого нового коммита/u);
+  assert.doesNotMatch(contributing, /\/review-claude/u);
   assert.match(pullRequestTemplate, /GPT-5\.3-Codex-Spark и Claude Sonnet 5/u);
   assert.doesNotMatch(pullRequestTemplate, /Codex, Claude и Gemini/u);
 });

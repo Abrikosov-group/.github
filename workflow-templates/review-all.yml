@@ -3,6 +3,9 @@ name: Организационное двойное ИИ-ревью
 "on":
   issue_comment:
     types: [created]
+  pull_request_target:
+    branches: [main]
+    types: [ready_for_review, synchronize, reopened]
 
 permissions:
   contents: read
@@ -10,25 +13,43 @@ permissions:
   pull-requests: write
 
 jobs:
-  review:
+  manual-review:
+    name: Повторить двойное ревью вручную
     if: >-
+      github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
-      (
-        github.event.comment.body == '/review-all' ||
-        github.event.comment.body == '/review-claude'
-      ) &&
+      github.event.comment.body == '/review-all' &&
       (
         github.event.comment.author_association == 'OWNER' ||
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'
       )
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@989a048f0f2d9d636aed42185e22d7e0a8ae4bf9
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@0f90d69183a5f82d35d9c311cac86e58f0cc89ee
     with:
+      trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  automatic-review:
+    name: Проверить новый снимок PR автоматически
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Обновляйте SHA только отдельным PR после проверки центрального workflow.
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@0f90d69183a5f82d35d9c311cac86e58f0cc89ee
+    with:
+      trigger: automatic
+      command: /review-all
+      repository: ${{ github.repository }}
+      pr_number: ${{ github.event.pull_request.number }}
+      expected_head_sha: ${{ github.event.pull_request.head.sha }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

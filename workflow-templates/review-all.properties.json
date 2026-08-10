@@ -1,6 +1,6 @@
 {
   "name": "Двойное ИИ-ревью Codex и Claude",
-  "description": "Подключает организационные команды /review-all и /review-claude без Gemini и API-ключей моделей.",
+  "description": "Автоматически запускает GPT-5.3-Codex-Spark и Claude; /review-all повторяет оба ревью вручную.",
   "iconName": "octicon code-review",
   "categories": [
     "Automation"
