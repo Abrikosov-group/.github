@@ -43,7 +43,7 @@ name: Организационное двойное ИИ-ревью
 permissions: {}
 
 concurrency:
-  group: organizational-review-${{ inputs.repository }}-${{ inputs.pr_number }}-${{ inputs.trigger == 'automatic' && inputs.expected_head_sha || format('manual-{0}', inputs.comment_id) }}
+  group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}-${{ inputs.trigger == 'automatic' && 'automatic' || format('manual-{0}', inputs.comment_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -192,8 +192,7 @@ jobs:
             exit 1
           fi
           if [[ "${TRIGGER}" == "automatic" && "${head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
-            echo "::error::Head PR изменился после автоматического события"
-            exit 1
+            echo "::notice::Событие относится к ${EXPECTED_HEAD_SHA}, выбран текущий Head ${head_sha}"
           fi
 
           {

@@ -148,10 +148,25 @@ test("автоматический источник закрепляет точ�
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
   assert.match(
     workflow,
-    /group: organizational-review-\$\{\{ inputs\.repository \}\}-\$\{\{ inputs\.pr_number \}\}-\$\{\{ inputs\.trigger == 'automatic' && inputs\.expected_head_sha/u,
+    /group: organizational-review-engine-\$\{\{ inputs\.repository \}\}-\$\{\{ inputs\.pr_number \}\}-\$\{\{ inputs\.trigger == 'automatic' && 'automatic'/u,
   );
   assert.match(workflow, /format\('manual-\{0\}', inputs\.comment_id\)/u);
+  assert.match(workflow, /выбран текущий Head \$\{head_sha\}/u);
+  assert.doesNotMatch(workflow, /Head PR изменился после автоматического события/u);
   assert.match(workflow, /cancel-in-progress: true/u);
+});
+
+test("дорогие этапы ревью ограничены по времени", () => {
+  const prepareCodex = workflow.match(/\n  prepare-codex:[\s\S]*?(?=\n  analyze-codex:)/u)?.[0];
+  const analyzeCodex = workflow.match(/\n  analyze-codex:[\s\S]*?(?=\n  publish-codex:)/u)?.[0];
+  const analyzeClaude = workflow.match(/\n  analyze-claude:[\s\S]*?(?=\n  publish-claude:)/u)?.[0];
+
+  assert.ok(prepareCodex);
+  assert.ok(analyzeCodex);
+  assert.ok(analyzeClaude);
+  assert.match(prepareCodex, /timeout-minutes: 10/u);
+  assert.match(analyzeCodex, /timeout-minutes: 25/u);
+  assert.match(analyzeClaude, /timeout-minutes: 25/u);
 });
 
 test("шаблон запускает ревью автоматически и оставляет ручной повтор", () => {
@@ -165,6 +180,8 @@ test("шаблон запускает ревью автоматически и �
   assert.match(caller, /trigger: manual/u);
   assert.match(caller, /trigger: automatic/u);
   assert.match(caller, /expected_head_sha: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
+  assert.match(caller, /group: organizational-review-caller-auto-/u);
+  assert.match(caller, /cancel-in-progress: true/u);
   assert.doesNotMatch(caller, /\/review-claude/u);
   assert.match(
     caller,
@@ -184,6 +201,8 @@ test("центральный репозиторий сам слушает ком
   assert.match(organizationCaller, /reopened/u);
   assert.match(organizationCaller, /trigger: manual/u);
   assert.match(organizationCaller, /trigger: automatic/u);
+  assert.match(organizationCaller, /group: organizational-review-caller-auto-/u);
+  assert.match(organizationCaller, /cancel-in-progress: true/u);
   assert.doesNotMatch(organizationCaller, /\/review-claude/u);
   assert.doesNotMatch(organizationCaller, /Gemini/iu);
 });

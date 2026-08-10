@@ -42,6 +42,9 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository
+    concurrency:
+      group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1b5bca7d2bb9b11f427eff3ac52d50703e2ceafc
     with:
       trigger: automatic
