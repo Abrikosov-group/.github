@@ -246,15 +246,32 @@ jobs:
               echo "::error::Не удалось определить комментарий команды"
               exit 1
             fi
-            existing_reaction="$(gh api \
-              "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions" \
-              --jq '.[] | select(.content == "rocket" and .user.login == "github-actions[bot]") | .id')"
-            if [[ -z "${existing_reaction}" ]]; then
+            reactions="$(gh api --paginate --slurp \
+              "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions?per_page=100")"
+            existing_rocket="$(jq -r '
+              [.[][]? | select(
+                .user.login == "github-actions[bot]" and .content == "rocket"
+              )] | first | .id // empty
+            ' <<< "${reactions}")"
+            if [[ -z "${existing_rocket}" ]]; then
               gh api --method POST \
                 -H 'Accept: application/vnd.github+json' \
                 "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions" \
                 --raw-field content='rocket' > /dev/null
             fi
+            while IFS= read -r reaction_id; do
+              [[ -z "${reaction_id}" ]] && continue
+              if ! gh api --method DELETE \
+                -H 'Accept: application/vnd.github+json' \
+                "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions/${reaction_id}" \
+                > /dev/null; then
+                echo "::warning::Не удалось удалить реакцию 👀 (${reaction_id})"
+              fi
+            done < <(jq -r '
+              [.[][]? | select(
+                .user.login == "github-actions[bot]" and .content == "eyes"
+              )] | .[].id
+            ' <<< "${reactions}")
           fi
 
           marker='<!-- organizational-review-status -->'

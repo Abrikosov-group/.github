@@ -45,19 +45,32 @@ function extractRunScript(source, stepName) {
   return body.join("\n");
 }
 
-function executeRunScript({ source = workflow, stepName, env, event = {}, ghMock }) {
+function executeRunScript({
+  source = workflow,
+  stepName,
+  env,
+  event = {},
+  ghMock,
+  commandMocks = {},
+}) {
   const root = mkdtempSync(join(tmpdir(), "organizational-review-test-"));
   try {
     const bin = join(root, "bin");
     const eventPath = join(root, "event.json");
     const outputPath = join(root, "output.txt");
     const summaryPath = join(root, "summary.md");
+    const ghLogPath = join(root, "gh.log");
     mkdirSync(bin);
     writeFileSync(join(bin, "gh"), ghMock, "utf8");
     chmodSync(join(bin, "gh"), 0o755);
+    for (const [name, script] of Object.entries(commandMocks)) {
+      writeFileSync(join(bin, name), script, "utf8");
+      chmodSync(join(bin, name), 0o755);
+    }
     writeFileSync(eventPath, JSON.stringify(event), "utf8");
     writeFileSync(outputPath, "", "utf8");
     writeFileSync(summaryPath, "", "utf8");
+    writeFileSync(ghLogPath, "", "utf8");
 
     const result = spawnSync("bash", ["-c", extractRunScript(source, stepName)], {
       encoding: "utf8",
@@ -67,6 +80,9 @@ function executeRunScript({ source = workflow, stepName, env, event = {}, ghMock
         GITHUB_EVENT_PATH: eventPath,
         GITHUB_OUTPUT: outputPath,
         GITHUB_STEP_SUMMARY: summaryPath,
+        GITHUB_WORKSPACE: root,
+        RUNNER_TEMP: root,
+        MOCK_GH_LOG: ghLogPath,
         ...env,
       },
     });
@@ -75,6 +91,7 @@ function executeRunScript({ source = workflow, stepName, env, event = {}, ghMock
       ...result,
       outputs: readFileSync(outputPath, "utf8"),
       summary: readFileSync(summaryPath, "utf8"),
+      ghLog: readFileSync(ghLogPath, "utf8"),
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -87,6 +104,99 @@ case "$*" in
   *"/issues/comments/"*) printf '%s\n' "\${MOCK_COMMENT_JSON}" ;;
   *"/pulls/"*) printf '%s\n' "\${MOCK_PR_JSON}" ;;
   *) echo "unexpected gh call: $*" >&2; exit 64 ;;
+esac
+`;
+
+const acknowledgementGhMock = `#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
+args="$*"
+if [[ "\${args}" == *"--method DELETE"* ]]; then
+  if [[ -n "\${MOCK_DELETE_FAILURE_ID:-}" &&
+        "\${args}" == *"/reactions/\${MOCK_DELETE_FAILURE_ID}"* ]]; then
+    exit 1
+  fi
+elif [[ "\${args}" == *"--method POST"* && "\${args}" == *"/reactions"* ]]; then
+  if [[ -n "\${MOCK_POST_FAILURE_CONTENT:-}" &&
+        "\${args}" == *"content=\${MOCK_POST_FAILURE_CONTENT}"* ]]; then
+    exit 1
+  fi
+  printf '{}\n'
+elif [[ "\${args}" == *"/reactions"* ]]; then
+  printf '%s\n' "\${MOCK_REACTIONS_JSON:-[[]]}"
+elif [[ "\${args}" == *"/issues/comments/"* ]]; then
+  printf '%s\n' "\${MOCK_COMMENT_JSON}"
+elif [[ "\${args}" == *"/pulls/"* ]]; then
+  printf '%s\n' "\${MOCK_PR_JSON}"
+else
+  echo "unexpected gh call: \${args}" >&2
+  exit 64
+fi
+`;
+
+const statusGhMock = `#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
+args="$*"
+if [[ "\${args}" == *"--method DELETE"* ]]; then
+  if [[ -n "\${MOCK_DELETE_FAILURE_ID:-}" &&
+        "\${args}" == *"/reactions/\${MOCK_DELETE_FAILURE_ID}"* ]]; then
+    exit 1
+  fi
+elif [[ "\${args}" == *"--method POST"* && "\${args}" == *"/reactions"* ]]; then
+  printf '{}\n'
+elif [[ "\${args}" == *"/reactions"* ]]; then
+  printf '%s\n' "\${MOCK_REACTIONS_JSON:-[[]]}"
+elif [[ "\${args}" == *"/issues/17/comments?"* ]]; then
+  printf '%s\n' "\${MOCK_STATUS_COMMENTS_JSON:-[[]]}"
+elif [[ "\${args}" == *"--method POST"* && "\${args}" == *"/issues/17/comments"* ]]; then
+  printf '{"id":99}\n'
+elif [[ "\${args}" == *"--method PATCH"* && "\${args}" == *"/issues/comments/"* ]]; then
+  printf '{}\n'
+else
+  echo "unexpected gh call: \${args}" >&2
+  exit 64
+fi
+`;
+
+const markerGhMock = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
+if [[ "$*" == "auth setup-git" ]]; then
+  exit 0
+elif [[ "$*" == *"/reviews?"* ]]; then
+  printf '%s\n' "\${MOCK_REVIEWS_JSON}"
+elif [[ "$*" == *"/pulls/17"* ]]; then
+  printf '%s\n' "\${MOCK_PR_JSON}"
+else
+  echo "unexpected gh call: $*" >&2
+  exit 64
+fi
+`;
+
+const finishStatusGhMock = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
+if [[ "$*" == *"/pulls/17"* ]]; then
+  printf '%s\n' "\${HEAD_SHA}"
+elif [[ "$*" == *"--method PATCH"* && "$*" == *"/issues/comments/99"* ]]; then
+  printf '{}\n'
+else
+  echo "unexpected gh call: $*" >&2
+  exit 64
+fi
+`;
+
+const gitHeadMock = `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "rev-parse HEAD") printf '%s\n' "\${BASE_SHA}" ;;
+  "rev-parse FETCH_HEAD") printf '%s\n' "\${HEAD_SHA}" ;;
+  fetch*) ;;
+  "merge-base --is-ancestor "*) ;;
+  "merge-base "*) printf '%s\n' "\${BASE_SHA}" ;;
+  diff*) printf '%s\n' 'diff --git a/file.txt b/file.txt' ;;
+  *) echo "unexpected git call: $*" >&2; exit 64 ;;
 esac
 `;
 
@@ -131,6 +241,50 @@ function automaticEvent(headSha) {
       head: { sha: headSha, repo: { full_name: "Abrikosov-group/project" } },
       draft: false,
     },
+  };
+}
+
+function reaction(id, content, login = "github-actions[bot]") {
+  return { id, content, user: { login } };
+}
+
+function slurpedReactions(...reactions) {
+  return JSON.stringify([reactions]);
+}
+
+function commandCommentFixture() {
+  return JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: "/review-all",
+    user: { login: "alice" },
+    author_association: "MEMBER",
+  });
+}
+
+function acknowledgementEnv(overrides = {}) {
+  return {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    COMMENT_ID: "91",
+    TRIGGER_ACTOR: "alice",
+    RUN_ATTEMPT: "1",
+    MOCK_COMMENT_JSON: commandCommentFixture(),
+    MOCK_PR_JSON: prFixture(),
+    MOCK_REACTIONS_JSON: slurpedReactions(),
+    ...overrides,
+  };
+}
+
+function statusEnv(overrides = {}) {
+  return {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    COMMAND_COMMENT_ID: "91",
+    COMMENT_ID: "91",
+    TRIGGER: "manual",
+    HEAD_SHA: "b".repeat(40),
+    RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+    ...overrides,
   };
 }
 
@@ -313,8 +467,27 @@ test("[2] ручной запуск вне main и из форка разреш�
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.outputs, /^base_ref=develop$/mu);
   assert.match(result.outputs, new RegExp(`^head_sha=${headSha}$`, "mu"));
+
+  const acknowledgement = executeRunScript({
+    source: caller,
+    stepName: "Проверить и подтвердить ручную команду",
+    ghMock: acknowledgementGhMock,
+    env: acknowledgementEnv({
+      MOCK_PR_JSON: prFixture({
+        baseRef: "develop",
+        headSha,
+        headRepository: "contributor/project",
+      }),
+    }),
+  });
+  assert.equal(acknowledgement.status, 0, acknowledgement.stderr);
+  assert.match(acknowledgement.outputs, /^accepted=true$/mu);
+  assert.match(acknowledgement.ghLog, /--raw-field content=eyes/u);
+
   for (const source of [caller, organizationCaller]) {
+    const acknowledgeJob = extractJob(source, "acknowledge-manual");
     const manualJob = extractJob(source, "manual-review");
+    assert.doesNotMatch(acknowledgeJob, /base\.ref|head\.repo/u);
     assert.doesNotMatch(manualJob, /base\.ref|head\.repo|draft/u);
   }
 });
@@ -442,6 +615,334 @@ test("центральный репозиторий сам слушает ком
   assert.doesNotMatch(organizationCaller, /Gemini/iu);
 });
 
+test("[4] посторонний автор, Draft и закрытый PR не запускают модели", () => {
+  assert.equal(
+    extractRunScript(caller, "Проверить и подтвердить ручную команду"),
+    extractRunScript(organizationCaller, "Проверить и подтвердить ручную команду"),
+  );
+  for (const source of [caller, organizationCaller]) {
+    const acknowledgeJob = extractJob(source, "acknowledge-manual");
+    const manualJob = extractJob(source, "manual-review");
+    assert.match(acknowledgeJob, /author_association == 'OWNER'/u);
+    assert.match(acknowledgeJob, /author_association == 'MEMBER'/u);
+    assert.match(acknowledgeJob, /author_association == 'COLLABORATOR'/u);
+    assert.match(acknowledgeJob, /runs-on: ubuntu-24\.04/u);
+    assert.match(acknowledgeJob, /timeout-minutes: 3/u);
+    assert.match(acknowledgeJob, /permissions:\n\s+issues: write\n\s+pull-requests: read/u);
+    assert.match(acknowledgeJob, /accepted: \$\{\{ steps\.ack\.outputs\.accepted \}\}/u);
+    assert.match(manualJob, /needs: acknowledge-manual/u);
+    assert.match(
+      manualJob,
+      /if: needs\.acknowledge-manual\.outputs\.accepted == 'true'/u,
+    );
+  }
+
+  for (const prJson of [prFixture({ draft: true }), prFixture({ state: "closed" })]) {
+    const result = executeRunScript({
+      source: caller,
+      stepName: "Проверить и подтвердить ручную команду",
+      ghMock: acknowledgementGhMock,
+      env: acknowledgementEnv({ MOCK_PR_JSON: prJson }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, /^accepted=false$/mu);
+    assert.match(result.ghLog, /--raw-field content=confused/u);
+  }
+
+  const unauthorized = executeRunScript({
+    source: caller,
+    stepName: "Проверить и подтвердить ручную команду",
+    ghMock: acknowledgementGhMock,
+    env: acknowledgementEnv({
+      MOCK_COMMENT_JSON: JSON.stringify({
+        issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+        body: "/review-all",
+        user: { login: "mallory" },
+        author_association: "NONE",
+      }),
+      TRIGGER_ACTOR: "mallory",
+    }),
+  });
+  assert.notEqual(unauthorized.status, 0);
+  assert.doesNotMatch(unauthorized.outputs, /^accepted=true$/mu);
+});
+
+test("[11] два существующих маркера не запускают модели и дают итоговый статус", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const reviews = JSON.stringify([[
+    {
+      id: 101,
+      user: { login: "github-actions[bot]" },
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+    },
+    {
+      id: 102,
+      user: { login: "github-actions[bot]" },
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+    },
+  ]]);
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    BASE_SHA: baseSha,
+    HEAD_SHA: headSha,
+    MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+    MOCK_REVIEWS_JSON: reviews,
+  };
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: commonEnv,
+  });
+  const claude = executeRunScript({
+    stepName: "Не расходовать квоту повторно для того же снимка",
+    ghMock: markerGhMock,
+    env: commonEnv,
+  });
+
+  assert.equal(codex.status, 0, codex.stderr);
+  assert.equal(claude.status, 0, claude.stderr);
+  assert.match(codex.outputs, /^needed=false$/mu);
+  assert.match(claude.outputs, /^needed=false$/mu);
+  assert.match(
+    extractJob(workflow, "analyze-codex"),
+    /if: needs\.prepare-codex\.outputs\.review_needed == 'true'/u,
+  );
+  assert.match(
+    extractJob(workflow, "analyze-claude"),
+    /if: steps\.existing\.outputs\.needed == 'true'/u,
+  );
+
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      HEAD_SHA: headSha,
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      CODEX_PREPARE_RESULT: "success",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "false",
+      CLAUDE_PUBLISH_RESULT: "skipped",
+    },
+  });
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.ghLog, /Двойное ИИ-ревью завершено/u);
+  assert.match(finish.ghLog, /GPT-5\.3-Codex-Spark.*актуальное ревью уже существует/u);
+  assert.match(finish.ghLog, /Claude Sonnet 5.*актуальное ревью уже существует/u);
+});
+
+test("[12] любой один маркер запускает только отсутствующую модель", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const cases = [
+    {
+      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      codexNeeded: "false",
+      claudeNeeded: "true",
+    },
+    {
+      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      codexNeeded: "true",
+      claudeNeeded: "false",
+    },
+  ];
+
+  for (const { marker, codexNeeded, claudeNeeded } of cases) {
+    const commonEnv = {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      BASE_SHA: baseSha,
+      HEAD_SHA: headSha,
+      MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+      MOCK_REVIEWS_JSON: JSON.stringify([[
+        { id: 101, user: { login: "github-actions[bot]" }, body: marker },
+      ]]),
+    };
+    const codex = executeRunScript({
+      stepName: "Проверить дубликат и подготовить вход модели",
+      ghMock: markerGhMock,
+      commandMocks: { git: gitHeadMock },
+      env: commonEnv,
+    });
+    const claude = executeRunScript({
+      stepName: "Не расходовать квоту повторно для того же снимка",
+      ghMock: markerGhMock,
+      env: commonEnv,
+    });
+
+    assert.equal(codex.status, 0, codex.stderr);
+    assert.equal(claude.status, 0, claude.stderr);
+    assert.match(codex.outputs, new RegExp(`^needed=${codexNeeded}$`, "mu"));
+    assert.match(claude.outputs, new RegExp(`^needed=${claudeNeeded}$`, "mu"));
+  }
+
+  assert.match(
+    extractJob(workflow, "analyze-codex"),
+    /if: needs\.prepare-codex\.outputs\.review_needed == 'true'/u,
+  );
+  assert.match(
+    extractJob(workflow, "analyze-claude"),
+    /if: steps\.existing\.outputs\.needed == 'true'/u,
+  );
+});
+
+test("[13] ручная команда проходит переходы 👀 → 🚀 и 👀 → 😕", () => {
+  const acknowledge = executeRunScript({
+    source: caller,
+    stepName: "Проверить и подтвердить ручную команду",
+    ghMock: acknowledgementGhMock,
+    env: acknowledgementEnv(),
+  });
+  assert.equal(acknowledge.status, 0, acknowledge.stderr);
+  assert.match(acknowledge.outputs, /^accepted=true$/mu);
+  assert.match(acknowledge.ghLog, /--raw-field content=eyes/u);
+
+  const start = executeRunScript({
+    stepName: "Поставить 🚀 и опубликовать статус запуска",
+    ghMock: statusGhMock,
+    env: statusEnv({
+      MOCK_REACTIONS_JSON: slurpedReactions(
+        reaction(11, "eyes"),
+        reaction(12, "eyes", "alice"),
+      ),
+    }),
+  });
+  assert.equal(start.status, 0, start.stderr);
+  assert.match(start.ghLog, /--raw-field content=rocket/u);
+  assert.match(start.ghLog, /--method DELETE.*\/issues\/comments\/91\/reactions\/11/u);
+  assert.doesNotMatch(start.ghLog, /\/issues\/comments\/91\/reactions\/12/u);
+
+  const finalize = executeRunScript({
+    source: caller,
+    stepName: "Завершить отображение ручной команды",
+    ghMock: acknowledgementGhMock,
+    env: statusEnv({
+      MOCK_REACTIONS_JSON: slurpedReactions(
+        reaction(21, "eyes"),
+        reaction(22, "eyes", "alice"),
+      ),
+    }),
+  });
+  assert.equal(finalize.status, 0, finalize.stderr);
+  assert.match(finalize.ghLog, /--method DELETE.*\/issues\/comments\/91\/reactions\/21/u);
+  assert.doesNotMatch(finalize.ghLog, /\/issues\/comments\/91\/reactions\/22/u);
+  assert.match(finalize.ghLog, /--raw-field content=confused/u);
+});
+
+test("[14] ошибка удаления 👀 в start-status не блокирует модели", () => {
+  const result = executeRunScript({
+    stepName: "Поставить 🚀 и опубликовать статус запуска",
+    ghMock: statusGhMock,
+    env: statusEnv({
+      MOCK_REACTIONS_JSON: slurpedReactions(reaction(31, "eyes")),
+      MOCK_DELETE_FAILURE_ID: "31",
+    }),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /::warning::/u);
+  assert.match(result.outputs, /^comment_id=99$/mu);
+});
+
+test("[15][18] финализатор имеет точный гейт и идемпотентно обеспечивает 😕", () => {
+  assert.equal(
+    extractRunScript(caller, "Завершить отображение ручной команды"),
+    extractRunScript(organizationCaller, "Завершить отображение ручной команды"),
+  );
+  for (const source of [caller, organizationCaller]) {
+    const finalizer = extractJob(source, "finalize-manual-ack");
+    assert.match(finalizer, /needs: \[acknowledge-manual, manual-review\]/u);
+    assert.match(
+      finalizer,
+      /if: \$\{\{ always\(\) && needs\.acknowledge-manual\.result != 'skipped' \}\}/u,
+    );
+    assert.match(finalizer, /runs-on: ubuntu-24\.04/u);
+    assert.match(finalizer, /timeout-minutes: 3/u);
+    assert.match(finalizer, /permissions:\n\s+issues: write/u);
+    assert.doesNotMatch(finalizer, /pull-requests:/u);
+  }
+
+  for (const reactions of [
+    slurpedReactions(),
+    slurpedReactions(reaction(41, "eyes")),
+    slurpedReactions(reaction(42, "confused")),
+  ]) {
+    const result = executeRunScript({
+      source: caller,
+      stepName: "Завершить отображение ручной команды",
+      ghMock: acknowledgementGhMock,
+      env: statusEnv({ MOCK_REACTIONS_JSON: reactions }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const confusedPosts = result.ghLog.match(/--raw-field content=confused/gu) ?? [];
+    assert.equal(confusedPosts.length, reactions.includes('"content":"confused"') ? 0 : 1);
+  }
+
+  for (const env of [
+    statusEnv({
+      MOCK_REACTIONS_JSON: slurpedReactions(reaction(43, "eyes")),
+      MOCK_DELETE_FAILURE_ID: "43",
+    }),
+    statusEnv({
+      MOCK_REACTIONS_JSON: slurpedReactions(),
+      MOCK_POST_FAILURE_CONTENT: "confused",
+    }),
+  ]) {
+    const result = executeRunScript({
+      source: caller,
+      stepName: "Завершить отображение ручной команды",
+      ghMock: acknowledgementGhMock,
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /::warning::/u);
+  }
+});
+
+test("[16] полный повтор очищает только старые реакции бота", () => {
+  const result = executeRunScript({
+    source: caller,
+    stepName: "Проверить и подтвердить ручную команду",
+    ghMock: acknowledgementGhMock,
+    env: acknowledgementEnv({
+      RUN_ATTEMPT: "2",
+      MOCK_REACTIONS_JSON: slurpedReactions(
+        reaction(51, "eyes"),
+        reaction(52, "rocket"),
+        reaction(53, "confused"),
+        reaction(54, "eyes", "alice"),
+      ),
+    }),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.ghLog, /--method DELETE.*\/issues\/comments\/91\/reactions\/51/u);
+  assert.match(result.ghLog, /--method DELETE.*\/issues\/comments\/91\/reactions\/52/u);
+  assert.match(result.ghLog, /--method DELETE.*\/issues\/comments\/91\/reactions\/53/u);
+  assert.doesNotMatch(result.ghLog, /\/issues\/comments\/91\/reactions\/54/u);
+
+  const cleanupFailure = executeRunScript({
+    source: caller,
+    stepName: "Проверить и подтвердить ручную команду",
+    ghMock: acknowledgementGhMock,
+    env: acknowledgementEnv({
+      RUN_ATTEMPT: "2",
+      MOCK_REACTIONS_JSON: slurpedReactions(reaction(55, "eyes")),
+      MOCK_DELETE_FAILURE_ID: "55",
+    }),
+  });
+  assert.notEqual(cleanupFailure.status, 0);
+  assert.doesNotMatch(cleanupFailure.outputs, /^accepted=true$/mu);
+});
+
 test("workflow сразу показывает запуск и обновляет единый статусный комментарий", () => {
   const startStatus = workflow.match(/\n  start-status:[\s\S]*?(?=\n  prepare-codex:)/u)?.[0];
   const finishStatus = workflow.match(/\n  finish-status:[\s\S]*$/u)?.[0];
@@ -474,4 +975,14 @@ test("пользовательская документация описывае
   assert.doesNotMatch(contributing, /\/review-claude/u);
   assert.match(pullRequestTemplate, /GPT-5\.3-Codex-Spark и Claude Sonnet 5/u);
   assert.doesNotMatch(pullRequestTemplate, /Codex, Claude и Gemini/u);
+});
+
+test("[17] README и CONTRIBUTING описывают очередь и реакции R4", () => {
+  for (const document of [readFileSync("README.md", "utf8"), contributing]) {
+    assert.match(document, /👀/u);
+    assert.match(document, /🚀/u);
+    assert.match(document, /😕/u);
+    assert.match(document, /очеред/u);
+    assert.doesNotMatch(document, /сразу ставит[^\n]*🚀/u);
+  }
 });

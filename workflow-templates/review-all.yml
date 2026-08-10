@@ -13,8 +13,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  manual-review:
-    name: Повторить двойное ревью вручную
+  acknowledge-manual:
+    name: Подтвердить ручную команду
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
@@ -24,6 +24,112 @@ jobs:
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'
       )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      issues: write
+      pull-requests: read
+    outputs:
+      accepted: ${{ steps.ack.outputs.accepted }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      TRIGGER_ACTOR: ${{ github.actor }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+
+    steps:
+      - name: Проверить и подтвердить ручную команду
+        id: ack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ||
+                ! "${COMMENT_ID}" =~ ^[1-9][0-9]*$ ||
+                ! "${RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::GitHub передал некорректные параметры ручной команды"
+            exit 1
+          fi
+
+          comment_json="$(gh api "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}")"
+          comment_issue_number="$(jq -er \
+            '.issue_url | capture("/issues/(?<number>[1-9][0-9]*)$").number' \
+            <<< "${comment_json}")"
+          comment_body="$(jq -er '.body' <<< "${comment_json}")"
+          comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
+          comment_author_association="$(jq -er '.author_association' <<< "${comment_json}")"
+          if [[ "${comment_issue_number}" != "${PR_NUMBER}" ||
+                "${comment_body}" != "/review-all" ||
+                "${comment_author}" != "${TRIGGER_ACTOR}" ]]; then
+            echo "::error::Комментарий не совпадает с событием ручной команды"
+            exit 1
+          fi
+          case "${comment_author_association}" in
+            OWNER|MEMBER|COLLABORATOR) ;;
+            *)
+              echo "::error::Автор комментария не имеет права запускать ревью"
+              exit 1
+              ;;
+          esac
+
+          if (( RUN_ATTEMPT > 1 )); then
+            reactions="$(gh api --paginate --slurp \
+              "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions?per_page=100")"
+            while IFS= read -r reaction_id; do
+              [[ -z "${reaction_id}" ]] && continue
+              gh api --method DELETE \
+                -H 'Accept: application/vnd.github+json' \
+                "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions/${reaction_id}" \
+                > /dev/null
+            done < <(jq -r '
+              [.[][]? | select(
+                .user.login == "github-actions[bot]" and
+                (.content == "eyes" or .content == "rocket" or .content == "confused")
+              )] | .[].id
+            ' <<< "${reactions}")
+          fi
+
+          pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+                "$(jq -r '.draft | tostring' <<< "${pr_json}")" != "false" ]]; then
+            reactions="$(gh api --paginate --slurp \
+              "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions?per_page=100")"
+            existing_confused="$(jq -r '
+              [.[][]? | select(
+                .user.login == "github-actions[bot]" and .content == "confused"
+              )] | first | .id // empty
+            ' <<< "${reactions}")"
+            if [[ -z "${existing_confused}" ]]; then
+              gh api --method POST \
+                -H 'Accept: application/vnd.github+json' \
+                "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+                --raw-field content='confused' > /dev/null
+            fi
+            echo "accepted=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          reactions="$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions?per_page=100")"
+          existing_eyes="$(jq -r '
+            [.[][]? | select(
+              .user.login == "github-actions[bot]" and .content == "eyes"
+            )] | first | .id // empty
+          ' <<< "${reactions}")"
+          if [[ -z "${existing_eyes}" ]]; then
+            gh api --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+              --raw-field content='eyes' > /dev/null
+          fi
+          echo "accepted=true" >> "${GITHUB_OUTPUT}"
+
+  manual-review:
+    name: Повторить двойное ревью вручную
+    needs: acknowledge-manual
+    if: needs.acknowledge-manual.outputs.accepted == 'true'
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@b8260385015c465f90a93f3a5b65b0c6b6841417
     with:
@@ -35,6 +141,75 @@ jobs:
       author_association: ${{ github.event.comment.author_association }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  finalize-manual-ack:
+    name: Завершить отображение ручной команды
+    needs: [acknowledge-manual, manual-review]
+    if: ${{ always() && needs.acknowledge-manual.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+
+    steps:
+      - name: Завершить отображение ручной команды
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          if [[ ! "${COMMENT_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::warning::Не удалось определить комментарий ручной команды"
+            exit 0
+          fi
+          if ! reactions="$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions?per_page=100")"; then
+            echo "::warning::Не удалось получить реакции ручной команды"
+            exit 0
+          fi
+          if ! bot_reactions="$(jq -c '
+            [.[][]? | select(
+              .user.login == "github-actions[bot]" and
+              (.content == "eyes" or .content == "rocket" or .content == "confused")
+            )]
+          ' <<< "${reactions}")"; then
+            echo "::warning::Не удалось разобрать реакции ручной команды"
+            exit 0
+          fi
+          if ! eyes_ids="$(jq -r '.[] | select(.content == "eyes") | .id' \
+            <<< "${bot_reactions}")" ||
+             ! has_rocket="$(jq -r 'any(.content == "rocket")' \
+            <<< "${bot_reactions}")" ||
+             ! has_confused="$(jq -r 'any(.content == "confused")' \
+            <<< "${bot_reactions}")"; then
+            echo "::warning::Не удалось определить состояние реакций ручной команды"
+            exit 0
+          fi
+
+          while IFS= read -r reaction_id; do
+            [[ -z "${reaction_id}" ]] && continue
+            if ! gh api --method DELETE \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions/${reaction_id}" \
+              > /dev/null; then
+              echo "::warning::Не удалось удалить устаревшую реакцию 👀 (${reaction_id})"
+            fi
+          done <<< "${eyes_ids}"
+
+          if [[ "${has_rocket}" == "true" ]]; then
+            exit 0
+          fi
+          if [[ "${has_confused}" != "true" ]]; then
+            if ! gh api --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+              --raw-field content='confused' > /dev/null; then
+              echo "::warning::Не удалось поставить реакцию 😕"
+            fi
+          fi
 
   automatic-review:
     name: Проверить новый снимок PR автоматически
