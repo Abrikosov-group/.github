@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(".github/workflows/review-all.yml", "utf8");
@@ -7,6 +17,122 @@ const caller = readFileSync("workflow-templates/review-all.yml", "utf8");
 const organizationCaller = readFileSync(".github/workflows/review-all-trigger.yml", "utf8");
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
+
+function extractJob(source, jobId) {
+  const match = source.match(new RegExp(`\\n  ${jobId}:[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:|$)`, "u"));
+  assert.ok(match, `job ${jobId} не найден`);
+  return match[0];
+}
+
+function extractRunScript(source, stepName) {
+  const lines = source.split("\n");
+  const nameIndex = lines.findIndex((line) => line === `      - name: ${stepName}`);
+  assert.notEqual(nameIndex, -1, `step ${stepName} не найден`);
+
+  const runIndex = lines.findIndex((line, index) => index > nameIndex && line === "        run: |");
+  assert.notEqual(runIndex, -1, `run-блок step ${stepName} не найден`);
+
+  const body = [];
+  for (const line of lines.slice(runIndex + 1)) {
+    if (line.startsWith("          ")) {
+      body.push(line.slice(10));
+    } else if (line === "") {
+      body.push("");
+    } else {
+      break;
+    }
+  }
+  return body.join("\n");
+}
+
+function executeRunScript({ source = workflow, stepName, env, event = {}, ghMock }) {
+  const root = mkdtempSync(join(tmpdir(), "organizational-review-test-"));
+  try {
+    const bin = join(root, "bin");
+    const eventPath = join(root, "event.json");
+    const outputPath = join(root, "output.txt");
+    const summaryPath = join(root, "summary.md");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "gh"), ghMock, "utf8");
+    chmodSync(join(bin, "gh"), 0o755);
+    writeFileSync(eventPath, JSON.stringify(event), "utf8");
+    writeFileSync(outputPath, "", "utf8");
+    writeFileSync(summaryPath, "", "utf8");
+
+    const result = spawnSync("bash", ["-c", extractRunScript(source, stepName)], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_OUTPUT: outputPath,
+        GITHUB_STEP_SUMMARY: summaryPath,
+        ...env,
+      },
+    });
+
+    return {
+      ...result,
+      outputs: readFileSync(outputPath, "utf8"),
+      summary: readFileSync(summaryPath, "utf8"),
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const contextGhMock = `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"/issues/comments/"*) printf '%s\n' "\${MOCK_COMMENT_JSON}" ;;
+  *"/pulls/"*) printf '%s\n' "\${MOCK_PR_JSON}" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 64 ;;
+esac
+`;
+
+function contextEnv(overrides = {}) {
+  return {
+    CALLER_REPOSITORY: "Abrikosov-group/project",
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    COMMENT_ID: "0",
+    COMMAND: "/review-all",
+    AUTHOR_ASSOCIATION: "",
+    EXPECTED_HEAD_SHA: "",
+    TRIGGER: "automatic",
+    TRIGGER_ACTOR: "alice",
+    EVENT_NAME: "pull_request_target",
+    EVENT_ACTION: "synchronize",
+    ...overrides,
+  };
+}
+
+function prFixture({
+  baseRef = "main",
+  baseSha = "a".repeat(40),
+  headSha = "b".repeat(40),
+  headRepository = "Abrikosov-group/project",
+  state = "open",
+  draft = false,
+} = {}) {
+  return JSON.stringify({
+    state,
+    draft,
+    base: { ref: baseRef, sha: baseSha },
+    head: { sha: headSha, repo: { full_name: headRepository } },
+  });
+}
+
+function automaticEvent(headSha) {
+  return {
+    pull_request: {
+      number: 17,
+      base: { ref: "main" },
+      head: { sha: headSha, repo: { full_name: "Abrikosov-group/project" } },
+      draft: false,
+    },
+  };
+}
 
 test("организационный workflow запускает только Codex и Claude", () => {
   assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
@@ -129,6 +255,111 @@ test("ручной источник проверяется без хрупког
   assert.doesNotMatch(workflow, /expected_issue_url/u);
 });
 
+test("[1] актуальный и устаревший SHA события выбирают текущий Head", () => {
+  const eventHeadSha = "b".repeat(40);
+  for (const { currentHeadSha, noticeExpected } of [
+    { currentHeadSha: eventHeadSha, noticeExpected: false },
+    { currentHeadSha: "c".repeat(40), noticeExpected: true },
+  ]) {
+    const result = executeRunScript({
+      stepName: "Проверить источник запуска",
+      ghMock: contextGhMock,
+      event: automaticEvent(eventHeadSha),
+      env: contextEnv({
+        EXPECTED_HEAD_SHA: eventHeadSha,
+        MOCK_PR_JSON: prFixture({ headSha: currentHeadSha }),
+      }),
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, new RegExp(`^head_sha=${currentHeadSha}$`, "mu"));
+    if (noticeExpected) {
+      assert.match(
+        result.stdout,
+        new RegExp(`::notice::.*${eventHeadSha}.*${currentHeadSha}`, "u"),
+      );
+    } else {
+      assert.doesNotMatch(result.stdout, /::notice::/u);
+    }
+  }
+});
+
+test("[2] ручной запуск вне main и из форка разрешён в обоих слоях", () => {
+  const headSha = "d".repeat(40);
+  const comment = JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: "/review-all",
+    user: { login: "alice" },
+    author_association: "MEMBER",
+  });
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMENT_ID: "91",
+      AUTHOR_ASSOCIATION: "MEMBER",
+      TRIGGER: "manual",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      MOCK_COMMENT_JSON: comment,
+      MOCK_PR_JSON: prFixture({
+        baseRef: "develop",
+        headSha,
+        headRepository: "contributor/project",
+      }),
+    }),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, /^base_ref=develop$/mu);
+  assert.match(result.outputs, new RegExp(`^head_sha=${headSha}$`, "mu"));
+  for (const source of [caller, organizationCaller]) {
+    const manualJob = extractJob(source, "manual-review");
+    assert.doesNotMatch(manualJob, /base\.ref|head\.repo|draft/u);
+  }
+});
+
+test("[3] автоматический запуск вне main и из форка запрещён в обоих слоях", () => {
+  const headSha = "e".repeat(40);
+  for (const source of [caller, organizationCaller]) {
+    const automaticJob = extractJob(source, "automatic-review");
+    assert.match(automaticJob, /github\.event\.pull_request\.base\.ref == 'main'/u);
+    assert.match(
+      automaticJob,
+      /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u,
+    );
+  }
+
+  for (const prJson of [
+    prFixture({ baseRef: "develop", headSha }),
+    prFixture({ headSha, headRepository: "contributor/project" }),
+  ]) {
+    const result = executeRunScript({
+      stepName: "Проверить источник запуска",
+      ghMock: contextGhMock,
+      event: automaticEvent(headSha),
+      env: contextEnv({ EXPECTED_HEAD_SHA: headSha, MOCK_PR_JSON: prJson }),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /Автоматическое ревью разрешено только для main/u);
+  }
+});
+
+test("[7–10] центральная очередь едина для manual и automatic одного PR", () => {
+  const concurrency = workflow.match(/\nconcurrency:\n[\s\S]*?\n\njobs:/u)?.[0];
+  assert.ok(concurrency);
+  assert.equal(
+    concurrency.trim().replace(/\n\njobs:$/u, ""),
+    [
+      "concurrency:",
+      "  group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}",
+      "  cancel-in-progress: false",
+      "  queue: max",
+    ].join("\n"),
+  );
+  assert.doesNotMatch(concurrency, /inputs\.trigger|inputs\.comment_id/u);
+});
+
 test("ограничения main и same-repo применяются только к автоматическому запуску", () => {
   assert.match(
     workflow,
@@ -150,14 +381,8 @@ test("автоматический источник закрепляет точ�
   assert.match(workflow, /event_head_repository/u);
   assert.match(workflow, /event_draft/u);
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
-  assert.match(
-    workflow,
-    /group: organizational-review-engine-\$\{\{ inputs\.repository \}\}-\$\{\{ inputs\.pr_number \}\}-\$\{\{ inputs\.trigger == 'automatic' && 'automatic'/u,
-  );
-  assert.match(workflow, /format\('manual-\{0\}', inputs\.comment_id\)/u);
   assert.match(workflow, /выбран текущий Head \$\{head_sha\}/u);
   assert.doesNotMatch(workflow, /Head PR изменился после автоматического события/u);
-  assert.match(workflow, /cancel-in-progress: true/u);
 });
 
 test("дорогие этапы ревью ограничены по времени", () => {

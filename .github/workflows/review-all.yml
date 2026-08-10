@@ -46,8 +46,9 @@ name: Организационное двойное ИИ-ревью
 permissions: {}
 
 concurrency:
-  group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}-${{ inputs.trigger == 'automatic' && 'automatic' || format('manual-{0}', inputs.comment_id) }}
-  cancel-in-progress: true
+  group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   context:
