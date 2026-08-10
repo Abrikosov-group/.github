@@ -146,6 +146,11 @@ test("автоматический источник закрепляет точ�
   assert.match(workflow, /event_head_repository/u);
   assert.match(workflow, /event_draft/u);
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
+  assert.match(
+    workflow,
+    /group: organizational-review-\$\{\{ inputs\.repository \}\}-\$\{\{ inputs\.pr_number \}\}-\$\{\{ inputs\.trigger == 'automatic' && inputs\.expected_head_sha/u,
+  );
+  assert.match(workflow, /format\('manual-\{0\}', inputs\.comment_id\)/u);
   assert.match(workflow, /cancel-in-progress: true/u);
 });
 
@@ -198,6 +203,8 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(finishStatus, /always\(\)/u);
   assert.match(finishStatus, /Двойное ИИ-ревью завершено/u);
   assert.match(finishStatus, /Двойное ИИ-ревью требует внимания/u);
+  assert.match(finishStatus, /current_head_sha/u);
+  assert.match(finishStatus, /Статус не обновляется: PR уже содержит более новый commit/u);
   assert.match(finishStatus, /--method PATCH/u);
   assert.match(workflow, /needs: \[context, start-status\]/u);
   assert.ok(workflow.indexOf("  start-status:") < workflow.indexOf("  prepare-codex:"));

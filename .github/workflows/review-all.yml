@@ -43,7 +43,7 @@ name: Организационное двойное ИИ-ревью
 permissions: {}
 
 concurrency:
-  group: organizational-review-${{ inputs.repository }}-${{ inputs.pr_number }}
+  group: organizational-review-${{ inputs.repository }}-${{ inputs.pr_number }}-${{ inputs.trigger == 'automatic' && inputs.expected_head_sha || format('manual-{0}', inputs.comment_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -898,6 +898,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ inputs.repository }}
+      PR_NUMBER: ${{ inputs.pr_number }}
       STATUS_COMMENT_ID: ${{ needs.start-status.outputs.comment_id }}
       HEAD_SHA: ${{ needs.context.outputs.head_sha }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -918,6 +919,14 @@ jobs:
           if [[ ! "${STATUS_COMMENT_ID}" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Не удалось определить статусный комментарий"
             exit 1
+          fi
+
+          current_head_sha="$(gh api \
+            "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
+            --jq '.head.sha')"
+          if [[ "${current_head_sha}" != "${HEAD_SHA}" ]]; then
+            echo "Статус не обновляется: PR уже содержит более новый commit ${current_head_sha}"
+            exit 0
           fi
 
           codex_ok=false
