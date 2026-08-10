@@ -139,7 +139,7 @@ jobs:
                 exit 1
               fi
               case "${EVENT_ACTION}" in
-                ready_for_review|synchronize|reopened) ;;
+                opened|ready_for_review|synchronize|reopened) ;;
                 *)
                   echo "::error::Недопустимое автоматическое событие PR"
                   exit 1

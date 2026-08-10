@@ -142,7 +142,7 @@ test("ограничения main и same-repo применяются тольк
 
 test("автоматический источник закрепляет точный Head готового PR", () => {
   assert.match(workflow, /EVENT_NAME: \$\{\{ github\.event_name \}\}/u);
-  assert.match(workflow, /ready_for_review\|synchronize\|reopened/u);
+  assert.match(workflow, /opened\|ready_for_review\|synchronize\|reopened/u);
   assert.match(workflow, /event_head_repository/u);
   assert.match(workflow, /event_draft/u);
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
