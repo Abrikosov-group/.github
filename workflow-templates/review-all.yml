@@ -25,7 +25,7 @@ jobs:
         github.event.comment.author_association == 'COLLABORATOR'
       )
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@3d8dd49fc1711af3a1dcfb83cafdff9662a217c0
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1b5bca7d2bb9b11f427eff3ac52d50703e2ceafc
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
@@ -44,7 +44,7 @@ jobs:
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@3d8dd49fc1711af3a1dcfb83cafdff9662a217c0
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1b5bca7d2bb9b11f427eff3ac52d50703e2ceafc
     with:
       trigger: automatic
       command: /review-all
