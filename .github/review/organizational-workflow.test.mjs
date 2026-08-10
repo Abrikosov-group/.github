@@ -184,7 +184,10 @@ test("шаблон запускает ревью автоматически и �
   assert.match(caller, /trigger: manual/u);
   assert.match(caller, /trigger: automatic/u);
   assert.match(caller, /expected_head_sha: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
-  assert.match(caller, /group: organizational-review-caller-auto-/u);
+  assert.match(
+    caller,
+    /group: organizational-review-caller-auto-\$\{\{ github\.repository \}\}-\$\{\{ github\.event\.pull_request\.number \}\}-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/u,
+  );
   assert.match(caller, /cancel-in-progress: true/u);
   assert.doesNotMatch(caller, /\/review-claude/u);
   assert.match(
@@ -205,7 +208,10 @@ test("центральный репозиторий сам слушает ком
   assert.match(organizationCaller, /reopened/u);
   assert.match(organizationCaller, /trigger: manual/u);
   assert.match(organizationCaller, /trigger: automatic/u);
-  assert.match(organizationCaller, /group: organizational-review-caller-auto-/u);
+  assert.match(
+    organizationCaller,
+    /group: organizational-review-caller-auto-\$\{\{ github\.repository \}\}-\$\{\{ github\.event\.pull_request\.number \}\}-\$\{\{ github\.event\.pull_request\.head\.sha \}\}/u,
+  );
   assert.match(organizationCaller, /cancel-in-progress: true/u);
   assert.doesNotMatch(organizationCaller, /\/review-claude/u);
   assert.doesNotMatch(organizationCaller, /Gemini/iu);
