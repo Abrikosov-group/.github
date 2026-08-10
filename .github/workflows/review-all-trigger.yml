@@ -24,7 +24,7 @@ jobs:
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR'
       )
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@e6416c361bbf32ff7dd4e40009baecc2ab3f1928
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@b8260385015c465f90a93f3a5b65b0c6b6841417
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
@@ -45,7 +45,7 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@e6416c361bbf32ff7dd4e40009baecc2ab3f1928
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@b8260385015c465f90a93f3a5b65b0c6b6841417
     with:
       trigger: automatic
       command: /review-all
