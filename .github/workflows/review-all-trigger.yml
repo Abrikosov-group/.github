@@ -130,7 +130,7 @@ jobs:
     name: Повторить двойное ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@5f799297ae3085570d799492a7e7df93e78df23a
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@aeada34402b0ae2a10850908a3e9c896b38201cd
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
@@ -220,7 +220,7 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@5f799297ae3085570d799492a7e7df93e78df23a
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@aeada34402b0ae2a10850908a3e9c896b38201cd
     with:
       trigger: automatic
       command: /review-all
