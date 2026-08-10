@@ -461,7 +461,7 @@ test("публикует Opus после Sonnet для того же diff", asyn
   assert.match(payload.body, /Claude Opus 5/u);
 });
 
-test("помечает опубликованное ревью устаревшим при гонке Head SHA", async () => {
+test("[6] помечает опубликованное ревью устаревшим при гонке Head SHA", async () => {
   const calls = [];
   const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
   const changedPullRequest = { base: { sha: BASE_SHA }, head: { sha: "3".repeat(40) } };
@@ -497,7 +497,7 @@ test("помечает опубликованное ревью устаревш�
   assert.match(stalePayload.body, /Ревью Claude устарело/u);
 });
 
-test("не публикует результат для устаревшего Head SHA", async () => {
+test("[5] не публикует результат для устаревшего Head SHA", async () => {
   const calls = [];
 
   await runMainWithFetch(async (url, options) => {

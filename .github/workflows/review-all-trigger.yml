@@ -1,4 +1,4 @@
-name: Организационное двойное ИИ-ревью
+name: Запуск организационного двойного ИИ-ревью
 
 "on":
   issue_comment:
@@ -130,7 +130,6 @@ jobs:
     name: Повторить двойное ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@5f799297ae3085570d799492a7e7df93e78df23a
     with:
       trigger: manual
@@ -221,7 +220,6 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
-    # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@5f799297ae3085570d799492a7e7df93e78df23a
     with:
       trigger: automatic
