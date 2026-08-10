@@ -26,6 +26,10 @@ test("Codex использует подписочный Spark xhigh на защ�
   assert.match(workflow, /web_search="disabled"/u);
   assert.match(workflow, /REVIEW_MODEL: gpt-5\.3-codex-spark/u);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
+  assert.match(
+    workflow,
+    /REVIEW_DISPATCH_TOKEN:\n\s+description: Устаревший совместимый секрет; новое ревью его не использует\n\s+required: false/u,
+  );
   assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
 });
 

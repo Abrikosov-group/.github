@@ -36,6 +36,9 @@ name: Организационное двойное ИИ-ревью
         default: ""
         type: string
     secrets:
+      REVIEW_DISPATCH_TOKEN:
+        description: Устаревший совместимый секрет; новое ревью его не использует
+        required: false
       CLAUDE_CODE_OAUTH_TOKEN:
         description: Подписочный OAuth-токен Claude Code
         required: true
