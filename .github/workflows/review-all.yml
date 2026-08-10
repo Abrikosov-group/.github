@@ -3,8 +3,13 @@ name: Организационное двойное ИИ-ревью
 "on":
   workflow_call:
     inputs:
+      trigger:
+        description: Источник запуска — manual или automatic
+        required: false
+        default: manual
+        type: string
       command:
-        description: Точная команда из комментария PR
+        description: Команда ревью; поддерживается только /review-all
         required: true
         type: string
       repository:
@@ -17,16 +22,20 @@ name: Организационное двойное ИИ-ревью
         type: number
       comment_id:
         description: ID комментария с командой
-        required: true
+        required: false
+        default: 0
         type: number
       author_association:
         description: Связь автора комментария с репозиторием
-        required: true
+        required: false
+        default: ""
+        type: string
+      expected_head_sha:
+        description: Head SHA из автоматического события pull_request_target
+        required: false
+        default: ""
         type: string
     secrets:
-      REVIEW_DISPATCH_TOKEN:
-        description: Устаревший совместимый секрет; Spark его не использует
-        required: false
       CLAUDE_CODE_OAUTH_TOKEN:
         description: Подписочный OAuth-токен Claude Code
         required: true
@@ -35,11 +44,11 @@ permissions: {}
 
 concurrency:
   group: organizational-review-${{ inputs.repository }}-${{ inputs.pr_number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   context:
-    name: Проверить команду и зафиксировать PR
+    name: Проверить запуск и зафиксировать PR
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
@@ -50,6 +59,7 @@ jobs:
       base_ref: ${{ steps.pr.outputs.base_ref }}
       base_sha: ${{ steps.pr.outputs.base_sha }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
+      trigger: ${{ steps.pr.outputs.trigger }}
     env:
       GH_TOKEN: ${{ github.token }}
       CALLER_REPOSITORY: ${{ github.repository }}
@@ -58,10 +68,14 @@ jobs:
       COMMENT_ID: ${{ inputs.comment_id }}
       COMMAND: ${{ inputs.command }}
       AUTHOR_ASSOCIATION: ${{ inputs.author_association }}
+      EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+      TRIGGER: ${{ inputs.trigger }}
       TRIGGER_ACTOR: ${{ github.actor }}
+      EVENT_NAME: ${{ github.event_name }}
+      EVENT_ACTION: ${{ github.event.action }}
 
     steps:
-      - name: Проверить источник команды
+      - name: Проверить источник запуска
         id: pr
         shell: bash
         run: |
@@ -72,43 +86,87 @@ jobs:
             echo "::error::Workflow вызван для недопустимого репозитория"
             exit 1
           fi
-          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ || ! "${COMMENT_ID}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::GitHub передал некорректный номер PR или комментария"
+          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::GitHub передал некорректный номер PR"
             exit 1
           fi
-          case "${COMMAND}" in
-            /review-all|/review-claude) ;;
-            *)
-              echo "::error::Неизвестная команда ревью"
-              exit 1
-              ;;
-          esac
-          case "${AUTHOR_ASSOCIATION}" in
-            OWNER|MEMBER|COLLABORATOR) ;;
-            *)
-              echo "::error::Автор комментария не имеет права запускать ревью"
-              exit 1
-              ;;
-          esac
-
-          comment_json="$(gh api "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}")"
-          comment_issue_number="$(jq -er \
-            '.issue_url | capture("/issues/(?<number>[1-9][0-9]*)$").number' \
-            <<< "${comment_json}")"
-          comment_body="$(jq -er '.body' <<< "${comment_json}")"
-          comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
-          comment_author_association="$(jq -er '.author_association' <<< "${comment_json}")"
-
-          if [[ "${comment_issue_number}" != "${PR_NUMBER}" ||
-                "${comment_body}" != "${COMMAND}" ||
-                "${comment_author}" != "${TRIGGER_ACTOR}" ]]; then
-            echo "::error::Комментарий не совпадает с параметрами вызова workflow"
+          if [[ "${COMMAND}" != "/review-all" ]]; then
+            echo "::error::Поддерживается только команда /review-all"
             exit 1
           fi
-          case "${comment_author_association}" in
-            OWNER|MEMBER|COLLABORATOR) ;;
+
+          case "${TRIGGER}" in
+            manual)
+              if [[ "${EVENT_NAME}" != "issue_comment" || "${EVENT_ACTION}" != "created" ||
+                    ! "${COMMENT_ID}" =~ ^[1-9][0-9]*$ ]]; then
+                echo "::error::Ручной запуск должен происходить из нового комментария PR"
+                exit 1
+              fi
+              case "${AUTHOR_ASSOCIATION}" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *)
+                  echo "::error::Автор комментария не имеет права запускать ревью"
+                  exit 1
+                  ;;
+              esac
+
+              comment_json="$(gh api "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}")"
+              comment_issue_number="$(jq -er \
+                '.issue_url | capture("/issues/(?<number>[1-9][0-9]*)$").number' \
+                <<< "${comment_json}")"
+              comment_body="$(jq -er '.body' <<< "${comment_json}")"
+              comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
+              comment_author_association="$(jq -er '.author_association' <<< "${comment_json}")"
+
+              if [[ "${comment_issue_number}" != "${PR_NUMBER}" ||
+                    "${comment_body}" != "${COMMAND}" ||
+                    "${comment_author}" != "${TRIGGER_ACTOR}" ||
+                    "${comment_author_association}" != "${AUTHOR_ASSOCIATION}" ]]; then
+                echo "::error::Комментарий не совпадает с параметрами вызова workflow"
+                exit 1
+              fi
+              case "${comment_author_association}" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *)
+                  echo "::error::Фактический автор комментария не имеет права запускать ревью"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            automatic)
+              if [[ "${EVENT_NAME}" != "pull_request_target" ]]; then
+                echo "::error::Автоматический запуск должен происходить из pull_request_target"
+                exit 1
+              fi
+              case "${EVENT_ACTION}" in
+                ready_for_review|synchronize|reopened) ;;
+                *)
+                  echo "::error::Недопустимое автоматическое событие PR"
+                  exit 1
+                  ;;
+              esac
+              if [[ "${COMMENT_ID}" != "0" || -n "${AUTHOR_ASSOCIATION}" ||
+                    ! "${EXPECTED_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::Автоматический запуск получил некорректные параметры"
+                exit 1
+              fi
+
+              event_pr_number="$(jq -er '.pull_request.number | tostring' "${GITHUB_EVENT_PATH}")"
+              event_base_ref="$(jq -er '.pull_request.base.ref' "${GITHUB_EVENT_PATH}")"
+              event_head_sha="$(jq -er '.pull_request.head.sha' "${GITHUB_EVENT_PATH}")"
+              event_head_repository="$(jq -er '.pull_request.head.repo.full_name' "${GITHUB_EVENT_PATH}")"
+              event_draft="$(jq -er '.pull_request.draft | tostring' "${GITHUB_EVENT_PATH}")"
+              if [[ "${event_pr_number}" != "${PR_NUMBER}" ||
+                    "${event_base_ref}" != "main" ||
+                    "${event_head_sha}" != "${EXPECTED_HEAD_SHA}" ||
+                    "${event_head_repository}" != "${REPOSITORY}" ||
+                    "${event_draft}" != "false" ]]; then
+                echo "::error::Событие не совпадает с безопасным снимком готового PR"
+                exit 1
+              fi
+              ;;
             *)
-              echo "::error::Фактический автор комментария не имеет права запускать ревью"
+              echo "::error::Неизвестный источник запуска ревью"
               exit 1
               ;;
           esac
@@ -123,8 +181,14 @@ jobs:
           base_ref="$(jq -er '.base.ref' <<< "${pr_json}")"
           base_sha="$(jq -er '.base.sha' <<< "${pr_json}")"
           head_sha="$(jq -er '.head.sha' <<< "${pr_json}")"
-          if [[ -z "${base_ref}" || ! "${base_sha}" =~ ^[0-9a-f]{40}$ || ! "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+          head_repository="$(jq -er '.head.repo.full_name' <<< "${pr_json}")"
+          if [[ "${base_ref}" != "main" || "${head_repository}" != "${REPOSITORY}" ||
+                ! "${base_sha}" =~ ^[0-9a-f]{40}$ || ! "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::GitHub не вернул точный снимок PR"
+            exit 1
+          fi
+          if [[ "${TRIGGER}" == "automatic" && "${head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
+            echo "::error::Head PR изменился после автоматического события"
             exit 1
           fi
 
@@ -132,12 +196,14 @@ jobs:
             echo "base_ref=${base_ref}"
             echo "base_sha=${base_sha}"
             echo "head_sha=${head_sha}"
+            echo "trigger=${TRIGGER}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "### Зафиксирован снимок PR"
             echo
             echo "- Репозиторий: \`${REPOSITORY}\`"
             echo "- PR: \`#${PR_NUMBER}\`"
+            echo "- Запуск: \`${TRIGGER}\`"
             echo "- Base: \`${base_ref}@${base_sha}\`"
             echo "- Head: \`${head_sha}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -145,7 +211,6 @@ jobs:
   prepare-codex:
     name: Подготовить точный diff для Codex Spark
     needs: context
-    if: inputs.command == '/review-all'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -631,7 +696,6 @@ jobs:
           claude_args: |
             --model claude-sonnet-5
             --effort xhigh
-            --max-turns 12
             --safe-mode
             --setting-sources user
             --permission-mode dontAsk
@@ -733,18 +797,14 @@ jobs:
       - publish-claude
     if: >-
       always() &&
+      inputs.trigger == 'manual' &&
       needs.context.result == 'success' &&
+      needs.prepare-codex.result == 'success' &&
       (
-        inputs.command == '/review-claude' ||
+        needs.prepare-codex.outputs.review_needed == 'false' ||
         (
-          needs.prepare-codex.result == 'success' &&
-          (
-            needs.prepare-codex.outputs.review_needed == 'false' ||
-            (
-              needs.analyze-codex.result == 'success' &&
-              needs.publish-codex.result == 'success'
-            )
-          )
+          needs.analyze-codex.result == 'success' &&
+          needs.publish-codex.result == 'success'
         )
       ) &&
       needs.analyze-claude.result == 'success' &&
