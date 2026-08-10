@@ -131,7 +131,7 @@ jobs:
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@b8260385015c465f90a93f3a5b65b0c6b6841417
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@5f799297ae3085570d799492a7e7df93e78df23a
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
@@ -222,7 +222,7 @@ jobs:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@b8260385015c465f90a93f3a5b65b0c6b6841417
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@5f799297ae3085570d799492a7e7df93e78df23a
     with:
       trigger: automatic
       command: /review-all
