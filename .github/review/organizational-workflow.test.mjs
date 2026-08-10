@@ -119,6 +119,21 @@ test("ручной источник проверяется без хрупког
   assert.doesNotMatch(workflow, /expected_issue_url/u);
 });
 
+test("ограничения main и same-repo применяются только к автоматическому запуску", () => {
+  assert.match(
+    workflow,
+    /if \[\[ "\$\{TRIGGER\}" == "automatic" &&\s+\("\$\{base_ref\}" != "main" \|\| "\$\{head_repository\}" != "\$\{REPOSITORY\}"\) \]\]/u,
+  );
+  assert.match(
+    workflow,
+    /if \[\[ ! "\$\{base_sha\}" =~ \^\[0-9a-f\]\{40\}\$ \|\| ! "\$\{head_sha\}" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /if \[\[ "\$\{base_ref\}" != "main" \|\| "\$\{head_repository\}" != "\$\{REPOSITORY\}"/u,
+  );
+});
+
 test("автоматический источник закрепляет точный Head готового PR", () => {
   assert.match(workflow, /EVENT_NAME: \$\{\{ github\.event_name \}\}/u);
   assert.match(workflow, /ready_for_review\|synchronize\|reopened/u);
@@ -147,10 +162,33 @@ test("шаблон запускает ревью автоматически и �
   assert.match(caller, /CLAUDE_CODE_OAUTH_TOKEN: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}/u);
 });
 
+test("workflow сразу показывает запуск и обновляет единый статусный комментарий", () => {
+  const startStatus = workflow.match(/\n  start-status:[\s\S]*?(?=\n  prepare-codex:)/u)?.[0];
+  const finishStatus = workflow.match(/\n  finish-status:[\s\S]*$/u)?.[0];
+
+  assert.ok(startStatus);
+  assert.ok(finishStatus);
+  assert.match(startStatus, /Поставить 🚀 и опубликовать статус запуска/u);
+  assert.match(startStatus, /--raw-field content='rocket'/u);
+  assert.match(startStatus, /<!-- organizational-review-status -->/u);
+  assert.match(startStatus, /GPT-5\.3-Codex-Spark \(\\`xhigh\\`\) — запущен/u);
+  assert.match(startStatus, /Claude Sonnet 5 \(\\`xhigh\\`\) — запущен/u);
+  assert.match(startStatus, /echo "comment_id=\$\{comment_id\}"/u);
+  assert.match(finishStatus, /always\(\)/u);
+  assert.match(finishStatus, /Двойное ИИ-ревью завершено/u);
+  assert.match(finishStatus, /Двойное ИИ-ревью требует внимания/u);
+  assert.match(finishStatus, /--method PATCH/u);
+  assert.match(workflow, /needs: \[context, start-status\]/u);
+  assert.ok(workflow.indexOf("  start-status:") < workflow.indexOf("  prepare-codex:"));
+  assert.doesNotMatch(workflow, /\n  acknowledge:/u);
+});
+
 test("пользовательская документация описывает ровно два ревью", () => {
   assert.match(contributing, /проверку двумя ревьюерами/u);
   assert.doesNotMatch(contributing, /тремя ревьюерами/u);
   assert.match(contributing, /после каждого нового коммита/u);
+  assert.match(contributing, /реакц/u);
+  assert.match(contributing, /статусн/u);
   assert.doesNotMatch(contributing, /\/review-claude/u);
   assert.match(pullRequestTemplate, /GPT-5\.3-Codex-Spark и Claude Sonnet 5/u);
   assert.doesNotMatch(pullRequestTemplate, /Codex, Claude и Gemini/u);

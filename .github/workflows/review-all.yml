@@ -182,9 +182,13 @@ jobs:
           base_sha="$(jq -er '.base.sha' <<< "${pr_json}")"
           head_sha="$(jq -er '.head.sha' <<< "${pr_json}")"
           head_repository="$(jq -er '.head.repo.full_name' <<< "${pr_json}")"
-          if [[ "${base_ref}" != "main" || "${head_repository}" != "${REPOSITORY}" ||
-                ! "${base_sha}" =~ ^[0-9a-f]{40}$ || ! "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "${base_sha}" =~ ^[0-9a-f]{40}$ || ! "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::GitHub не вернул точный снимок PR"
+            exit 1
+          fi
+          if [[ "${TRIGGER}" == "automatic" &&
+                ("${base_ref}" != "main" || "${head_repository}" != "${REPOSITORY}") ]]; then
+            echo "::error::Автоматическое ревью разрешено только для main и ветки этого репозитория"
             exit 1
           fi
           if [[ "${TRIGGER}" == "automatic" && "${head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
@@ -208,9 +212,95 @@ jobs:
             echo "- Head: \`${head_sha}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+  start-status:
+    name: Показать запуск двойного ревью
+    needs: context
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      issues: write
+      pull-requests: write
+    outputs:
+      comment_id: ${{ steps.status.outputs.comment_id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ inputs.repository }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      COMMAND_COMMENT_ID: ${{ inputs.comment_id }}
+      TRIGGER: ${{ needs.context.outputs.trigger }}
+      HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Поставить 🚀 и опубликовать статус запуска
+        id: status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${TRIGGER}" == "manual" ]]; then
+            if [[ ! "${COMMAND_COMMENT_ID}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Не удалось определить комментарий команды"
+              exit 1
+            fi
+            existing_reaction="$(gh api \
+              "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions" \
+              --jq '.[] | select(.content == "rocket" and .user.login == "github-actions[bot]") | .id')"
+            if [[ -z "${existing_reaction}" ]]; then
+              gh api --method POST \
+                -H 'Accept: application/vnd.github+json' \
+                "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions" \
+                --raw-field content='rocket' > /dev/null
+            fi
+          fi
+
+          marker='<!-- organizational-review-status -->'
+          head_short="${HEAD_SHA:0:12}"
+          body="$(cat <<EOF
+          ${marker}
+          ### 🚀 Двойное ИИ-ревью запущено
+
+          Проверяется commit \`${head_short}\`.
+
+          - ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+          - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен
+
+          [Открыть ход выполнения](${RUN_URL})
+
+          _Этот комментарий обновится после завершения обоих ревьюеров._
+          EOF
+          )"
+
+          comments="$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
+          comment_id="$(jq -r \
+            --arg marker "${marker}" \
+            '[.[][]? | select(
+              .user.login == "github-actions[bot]" and
+              ((.body // "") | contains($marker))
+            )] | first | .id // empty' \
+            <<< "${comments}")"
+
+          if [[ -n "${comment_id}" ]]; then
+            gh api --method PATCH \
+              "repos/${REPOSITORY}/issues/comments/${comment_id}" \
+              --raw-field body="${body}" > /dev/null
+          else
+            response="$(gh api --method POST \
+              "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --raw-field body="${body}")"
+            comment_id="$(jq -er '.id | tostring' <<< "${response}")"
+          fi
+
+          if [[ ! "${comment_id}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::GitHub не вернул ID статусного комментария"
+            exit 1
+          fi
+          echo "comment_id=${comment_id}" >> "${GITHUB_OUTPUT}"
+
   prepare-codex:
     name: Подготовить точный diff для Codex Spark
-    needs: context
+    needs: [context, start-status]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -520,7 +610,7 @@ jobs:
 
   analyze-claude:
     name: Проанализировать PR с Claude Sonnet 5
-    needs: context
+    needs: [context, start-status]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -786,10 +876,11 @@ jobs:
           set -euo pipefail
           node _review_infra/.github/review/publish-claude-review.mjs
 
-  acknowledge:
-    name: Подтвердить завершение команды
+  finish-status:
+    name: Обновить итог двойного ревью
     needs:
       - context
+      - start-status
       - prepare-codex
       - analyze-codex
       - publish-codex
@@ -797,41 +888,86 @@ jobs:
       - publish-claude
     if: >-
       always() &&
-      inputs.trigger == 'manual' &&
       needs.context.result == 'success' &&
-      needs.prepare-codex.result == 'success' &&
-      (
-        needs.prepare-codex.outputs.review_needed == 'false' ||
-        (
-          needs.analyze-codex.result == 'success' &&
-          needs.publish-codex.result == 'success'
-        )
-      ) &&
-      needs.analyze-claude.result == 'success' &&
-      (
-        needs.analyze-claude.outputs.review_needed == 'false' ||
-        needs.publish-claude.result == 'success'
-      )
+      needs.start-status.result == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 3
     permissions:
       issues: write
       pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ inputs.repository }}
-      COMMENT_ID: ${{ inputs.comment_id }}
+      STATUS_COMMENT_ID: ${{ needs.start-status.outputs.comment_id }}
+      HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      CODEX_PREPARE_RESULT: ${{ needs.prepare-codex.result }}
+      CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
+      CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
+      CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
+      CLAUDE_ANALYZE_RESULT: ${{ needs.analyze-claude.result }}
+      CLAUDE_REVIEW_NEEDED: ${{ needs.analyze-claude.outputs.review_needed }}
+      CLAUDE_PUBLISH_RESULT: ${{ needs.publish-claude.result }}
 
     steps:
-      - name: Поставить реакцию запуска
+      - name: Показать результат обоих ревьюеров
         shell: bash
         run: |
           set -euo pipefail
-          existing="$(gh api "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-            --jq '.[] | select(.content == "rocket" and .user.login == "github-actions[bot]") | .id')"
-          if [[ -z "${existing}" ]]; then
-            gh api --method POST \
-              -H 'Accept: application/vnd.github+json' \
-              "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-              --raw-field content='rocket' > /dev/null
+
+          if [[ ! "${STATUS_COMMENT_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Не удалось определить статусный комментарий"
+            exit 1
           fi
+
+          codex_ok=false
+          if [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
+            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
+          elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
+            codex_ok=true
+            codex_line="- ✅ GPT-5.3-Codex-Spark (\`xhigh\`) — актуальное ревью уже существует"
+          elif [[ "${CODEX_ANALYZE_RESULT}" == "success" &&
+                  "${CODEX_PUBLISH_RESULT}" == "success" ]]; then
+            codex_ok=true
+            codex_line="- ✅ GPT-5.3-Codex-Spark (\`xhigh\`) — ревью опубликовано"
+          else
+            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — анализ или публикация завершились ошибкой"
+          fi
+
+          claude_ok=false
+          if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
+            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — анализ завершился ошибкой"
+          elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
+            claude_ok=true
+            claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — актуальное ревью уже существует"
+          elif [[ "${CLAUDE_PUBLISH_RESULT}" == "success" ]]; then
+            claude_ok=true
+            claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — ревью опубликовано"
+          else
+            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — публикация завершилась ошибкой"
+          fi
+
+          if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" ]]; then
+            heading='### ✅ Двойное ИИ-ревью завершено'
+          else
+            heading='### ❌ Двойное ИИ-ревью требует внимания'
+          fi
+
+          marker='<!-- organizational-review-status -->'
+          head_short="${HEAD_SHA:0:12}"
+          body="$(cat <<EOF
+          ${marker}
+          ${heading}
+
+          Проверен commit \`${head_short}\`.
+
+          ${codex_line}
+          ${claude_line}
+
+          [Открыть журнал выполнения](${RUN_URL})
+          EOF
+          )"
+
+          gh api --method PATCH \
+            "repos/${REPOSITORY}/issues/comments/${STATUS_COMMENT_ID}" \
+            --raw-field body="${body}" > /dev/null
