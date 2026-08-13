@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   collectDiffAnchors,
   collectDiffLines,
   main,
+  partitionFindingAnchors,
   reviewNeeded,
   reviewMarker,
   validateFindingAnchors,
@@ -54,16 +55,19 @@ async function runMainWithFetch(fetchImplementation, environmentOverrides = {}) 
   );
   const previousFetch = globalThis.fetch;
   const previousLog = console.log;
+  const previousWarn = console.warn;
 
   Object.assign(process.env, environment);
   globalThis.fetch = fetchImplementation;
   console.log = () => {};
+  console.warn = () => {};
 
   try {
     await main();
   } finally {
     globalThis.fetch = previousFetch;
     console.log = previousLog;
+    console.warn = previousWarn;
     for (const [key, value] of previousEnvironment) {
       if (value === undefined) {
         delete process.env[key];
@@ -428,6 +432,55 @@ test("проверяет inline comments по точному diff из дове�
   const payload = JSON.parse(calls[3].options.body);
   assert.equal(payload.comments.length, 1);
   assert.equal(payload.comments[0].line, 12);
+});
+
+test("публикует замечание с неверной привязкой в итоге и сохраняет его в метриках", async () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-unanchored-"));
+  const diffPath = join(temporaryDirectory, "pull-request.diff");
+  const outputPath = join(temporaryDirectory, "github-output.txt");
+  writeFileSync(diffPath, fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+added" }));
+  writeFileSync(outputPath, "");
+
+  const review = validReview();
+  review.findings.push({
+    ...review.findings[0],
+    priority: "P2",
+    line: 13,
+    title: "Замечание указано на неизменённой строке",
+  });
+  const partition = partitionFindingAnchors(review.findings, readFileSync(diffPath, "utf8"));
+  assert.equal(partition.anchored.length, 1);
+  assert.equal(partition.unanchored.length, 1);
+
+  const calls = [];
+  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  try {
+    await runMainWithFetch(async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (calls.length === 1 || calls.length === 3 || calls.length === 5) {
+        return jsonResponse(currentPullRequest);
+      }
+      if (calls.length === 2) {
+        return jsonResponse([]);
+      }
+      return jsonResponse({
+        id: 47,
+        html_url: "https://github.com/example/sawabook/pull/55#review-with-unanchored",
+      });
+    }, {
+      REVIEW_JSON: JSON.stringify(review),
+      DIFF_PATH: diffPath,
+      GITHUB_OUTPUT: outputPath,
+    });
+
+    const payload = JSON.parse(calls[3].options.body);
+    assert.equal(payload.comments.length, 1);
+    assert.match(payload.body, /<!-- review-findings:P0=0;P1=1;P2=1 -->/u);
+    assert.match(payload.body, /Замечания без корректной привязки/u);
+    assert.match(readFileSync(outputPath, "utf8"), /^blocking_findings=2$/mu);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("не публикует повторное ревью того же diff", async () => {

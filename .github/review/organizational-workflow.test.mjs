@@ -621,11 +621,33 @@ test("[7–10] центральная очередь едина для manual и
     [
       "concurrency:",
       "  group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}",
-      "  cancel-in-progress: ${{ inputs.trigger == 'automatic' }}",
+      "  cancel-in-progress: false",
     ].join("\n"),
   );
-  assert.match(concurrency, /inputs\.trigger/u);
+  assert.doesNotMatch(concurrency, /inputs\.trigger/u);
   assert.doesNotMatch(concurrency, /inputs\.comment_id|head_sha/u);
+});
+
+test("новый automatic-запуск не отменяет ручной review-all", () => {
+  const concurrency = workflow.match(/\nconcurrency:\n[\s\S]*?\n\njobs:/u)?.[0];
+  assert.ok(concurrency);
+  assert.match(concurrency, /cancel-in-progress: false/u);
+  assert.doesNotMatch(concurrency, /cancel-in-progress:.*automatic/u);
+});
+
+test("GitHub App сам определяет login доверенного издателя", () => {
+  const result = executeRunScript({
+    stepName: "Определить доверенного издателя",
+    ghMock: contextGhMock,
+    env: {
+      APP_CLIENT_ID: "Iv23example",
+      APP_SLUG: "abrikosov-review-gate-publisher",
+      FALLBACK_LOGIN: "github-actions[bot]",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, /^login=abrikosov-review-gate-publisher\[bot\]$/mu);
+  assert.match(workflow, /client-id: \$\{\{ inputs\.review_gate_app_client_id \}\}/u);
 });
 
 test("разрешённые base-ветки параметризованы, а same-repo обязателен для автозапуска", () => {
@@ -652,6 +674,22 @@ test("автоматический источник закрепляет точ�
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
   assert.match(workflow, /выбран текущий Head \$\{head_sha\}/u);
   assert.doesNotMatch(workflow, /Head PR изменился после автоматического события/u);
+});
+
+test("bot-login с фактическим write-доступом проходит проверку прав", () => {
+  const headSha = "e".repeat(40);
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent(headSha),
+    env: contextEnv({
+      EXPECTED_HEAD_SHA: headSha,
+      TRIGGER_ACTOR: "dependabot[bot]",
+      MOCK_PERMISSION: "write",
+      MOCK_PR_JSON: prFixture({ headSha }),
+    }),
+  });
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("дорогие этапы ревью ограничены по времени", () => {
@@ -770,12 +808,12 @@ test("[11] два существующих маркера не запускаю�
     {
       id: 101,
       user: { login: "github-actions[bot]" },
-      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
     },
     {
       id: 102,
       user: { login: "github-actions[bot]" },
-      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
     },
   ]]);
   const commonEnv = {
@@ -828,9 +866,13 @@ test("[11] два существующих маркера не запускаю�
       CODEX_REVIEW_NEEDED: "false",
       CODEX_ANALYZE_RESULT: "skipped",
       CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "0",
       CLAUDE_ANALYZE_RESULT: "success",
       CLAUDE_REVIEW_NEEDED: "false",
       CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
       REVIEW_GATE_CONTEXT: "",
     },
   });
@@ -840,17 +882,162 @@ test("[11] два существующих маркера не запускаю�
   assert.match(finish.ghLog, /Claude Sonnet 5.*актуальное ревью уже существует/u);
 });
 
+test("повторно использованное ревью с P0–P2 не может сделать gate зелёным", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const reviews = JSON.stringify([[
+    {
+      id: 201,
+      user: { login: "github-actions[bot]" },
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->`,
+    },
+    {
+      id: 202,
+      user: { login: "github-actions[bot]" },
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+    },
+  ]]);
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    BASE_SHA: baseSha,
+    HEAD_SHA: headSha,
+    TRIGGER: "automatic",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
+    MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+    MOCK_REVIEWS_JSON: reviews,
+  };
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: commonEnv,
+  });
+  const claude = executeRunScript({
+    stepName: "Не расходовать квоту повторно для того же снимка",
+    ghMock: markerGhMock,
+    env: commonEnv,
+  });
+  assert.match(codex.outputs, /^blocking_findings=1$/mu);
+  assert.match(claude.outputs, /^blocking_findings=0$/mu);
+
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      HEAD_SHA: headSha,
+      MODE: "all",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      CODEX_PREPARE_RESULT: "success",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "1",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "false",
+      CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
+    },
+  });
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.ghLog, /Блокирующих замечаний P0–P2: \*\*1\*\*/u);
+  assert.match(finish.ghLog, /--raw-field state=failure/u);
+  assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
+});
+
+test("старое ревью без доверенных метрик запускает модель повторно", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    BASE_SHA: baseSha,
+    HEAD_SHA: headSha,
+    TRIGGER: "automatic",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
+    MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+    MOCK_REVIEWS_JSON: JSON.stringify([[
+      {
+        id: 301,
+        user: { login: "github-actions[bot]" },
+        body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      },
+    ]]),
+  };
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: commonEnv,
+  });
+  assert.equal(codex.status, 0, codex.stderr);
+  assert.match(codex.outputs, /^needed=true$/mu);
+  assert.match(codex.stdout, /не содержит доверенных метрик/u);
+});
+
+test("из нескольких ручных ревью одного SHA gate берёт самое новое", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const codexMarker = `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`;
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      BASE_SHA: baseSha,
+      HEAD_SHA: headSha,
+      TRIGGER: "automatic",
+      REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+      REUSE_EXISTING_REVIEWS: "true",
+      MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+      MOCK_REVIEWS_JSON: JSON.stringify([[
+        {
+          id: 401,
+          user: { login: "github-actions[bot]" },
+          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=1;P2=0 -->`,
+        },
+        {
+          id: 402,
+          user: { login: "github-actions[bot]" },
+          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+        },
+      ]]),
+    },
+  });
+  assert.equal(codex.status, 0, codex.stderr);
+  assert.match(codex.outputs, /^blocking_findings=0$/mu);
+});
+
+test("ручной запуск и отключённое переиспользование принудительно публикуют новое ревью", () => {
+  for (const jobId of ["publish-codex", "publish-claude"]) {
+    assert.match(
+      extractJob(workflow, jobId),
+      /FORCE_REVIEW: \$\{\{ needs\.context\.outputs\.trigger == 'manual' \|\| inputs\.reuse_existing_reviews == false \}\}/u,
+    );
+  }
+});
+
 test("[12] любой один маркер запускает только отсутствующую модель", () => {
   const baseSha = "a".repeat(40);
   const headSha = "b".repeat(40);
   const cases = [
     {
-      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
       codexNeeded: "false",
       claudeNeeded: "true",
     },
     {
-      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
       codexNeeded: "true",
       claudeNeeded: "false",
     },

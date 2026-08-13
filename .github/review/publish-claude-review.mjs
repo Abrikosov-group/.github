@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const MAX_FINDINGS = 20;
@@ -266,15 +266,28 @@ export function collectDiffAnchors(diff) {
 }
 
 export function validateFindingAnchors(findings, diff) {
+  const { unanchored } = partitionFindingAnchors(findings, diff);
+  if (unanchored.length > 0) {
+    const finding = unanchored[0];
+    throw new Error(
+      `Finding ${finding.path}:${finding.side}:${finding.line} не привязан к изменённой строке точного diff.`,
+    );
+  }
+}
+
+export function partitionFindingAnchors(findings, diff) {
   const anchorsByPath = collectDiffAnchors(diff);
+  const anchored = [];
+  const unanchored = [];
 
   for (const finding of findings) {
-    if (!anchorsByPath.get(finding.path)?.[finding.side].has(finding.line)) {
-      throw new Error(
-        `Finding ${finding.path}:${finding.side}:${finding.line} не привязан к изменённой строке точного diff.`,
-      );
-    }
+    const target = anchorsByPath.get(finding.path)?.[finding.side].has(finding.line)
+      ? anchored
+      : unanchored;
+    target.push(finding);
   }
+
+  return { anchored, unanchored };
 }
 
 export function reviewMarker(baseSha, headSha, reviewModel) {
@@ -289,27 +302,49 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
   return `<!-- ${REVIEW_MODELS.get(reviewModel).marker}:${baseSha}:${headSha}:${reviewModel} -->`;
 }
 
-export function buildReviewPayload(review, baseSha, headSha, reviewModel) {
+export function buildReviewPayload(
+  review,
+  baseSha,
+  headSha,
+  reviewModel,
+  { unanchoredFindings = [] } = {},
+) {
   const model = REVIEW_MODELS.get(reviewModel);
   reviewMarker(baseSha, headSha, reviewModel);
+  const allFindings = [...review.findings, ...unanchoredFindings];
   const counts = { P0: 0, P1: 0, P2: 0 };
-  for (const finding of review.findings) {
+  for (const finding of allFindings) {
     counts[finding.priority] += 1;
   }
 
-  const summary = review.findings.length === 0
+  const summary = allFindings.length === 0
     ? "Существенных проблем не найдено."
     : `Найдено замечаний: P0 — ${counts.P0}, P1 — ${counts.P1}, P2 — ${counts.P2}.`;
+  const unanchoredSection = unanchoredFindings.length === 0
+    ? []
+    : [
+        "",
+        "### Замечания без корректной привязки к строке",
+        "",
+        "GitHub не позволяет опубликовать эти замечания inline, поэтому они приведены в итоге ревью:",
+        "",
+        ...unanchoredFindings.flatMap((finding) => [
+          `- **[${finding.priority}] ${finding.title}** (предполагаемая строка: \`${finding.path.replaceAll("`", "\\`")}:${finding.line}\`)`,
+          `  ${finding.body.replaceAll("\n", "\n  ")}`,
+        ]),
+      ];
 
   return {
     commit_id: headSha,
     body: [
       reviewMarker(baseSha, headSha, reviewModel),
+      `<!-- review-findings:P0=${counts.P0};P1=${counts.P1};P2=${counts.P2} -->`,
       `### Ревью ${model.reviewer}`,
       "",
       `**Модель:** ${model.displayName}, усилие \`xhigh\`.`,
       "",
       summary,
+      ...unanchoredSection,
       "",
       `_Проверен commit \`${headSha}\`._`,
     ].join("\n"),
@@ -384,24 +419,35 @@ async function findExistingReview({
   token,
   publisherLogin = "github-actions[bot]",
 }) {
+  let latestReview = null;
   for (let page = 1; page <= 20; page += 1) {
     const reviews = await githubRequest(
       `/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100&page=${page}`,
       { token },
     );
 
-    const existing = reviews.find(
-      (review) => review.user?.login === publisherLogin && review.body?.includes(marker),
-    );
-    if (existing) {
-      return existing;
+    for (const review of reviews) {
+      if (
+        review.user?.login === publisherLogin &&
+        review.body?.includes(marker) &&
+        (latestReview === null || review.id > latestReview.id)
+      ) {
+        latestReview = review;
+      }
     }
     if (reviews.length < 100) {
-      return null;
+      return latestReview;
     }
   }
 
   throw new Error("Не удалось проверить идемпотентность: в PR больше 2000 ревью.");
+}
+
+function writeWorkflowOutput(name, value) {
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (outputPath) {
+    appendFileSync(outputPath, `${name}=${value}\n`, "utf8");
+  }
 }
 
 function exactDiff() {
@@ -509,8 +555,13 @@ export async function main() {
     return;
   }
 
-  if (review.findings.length > 0) {
-    validateFindingAnchors(review.findings, exactDiff());
+  const { anchored, unanchored } = review.findings.length > 0
+    ? partitionFindingAnchors(review.findings, exactDiff())
+    : { anchored: [], unanchored: [] };
+  if (unanchored.length > 0) {
+    console.warn(
+      `::warning::${unanchored.length} замечаний не привязаны к изменённой строке и будут опубликованы в итоге ревью.`,
+    );
   }
 
   const latestPullRequest = await currentPullRequest({ repository, pullNumber, token });
@@ -521,7 +572,13 @@ export async function main() {
 
   const result = await githubRequest(`/repos/${repository}/pulls/${pullNumber}/reviews`, {
     method: "POST",
-    body: buildReviewPayload(review, baseSha, headSha, reviewModel),
+    body: buildReviewPayload(
+      { findings: anchored },
+      baseSha,
+      headSha,
+      reviewModel,
+      { unanchoredFindings: unanchored },
+    ),
     token,
   });
 
@@ -539,6 +596,7 @@ export async function main() {
     return;
   }
 
+  writeWorkflowOutput("blocking_findings", review.findings.length);
   console.log(`Атомарное ревью опубликовано: ${result.html_url}`);
 }
 
