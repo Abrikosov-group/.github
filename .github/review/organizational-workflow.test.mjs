@@ -102,6 +102,7 @@ const contextGhMock = `#!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
   *"/issues/comments/"*) printf '%s\n' "\${MOCK_COMMENT_JSON}" ;;
+  *"/collaborators/"*"/permission"*) printf '%s\n' "\${MOCK_PERMISSION:-write}" ;;
   *"/pulls/"*) printf '%s\n' "\${MOCK_PR_JSON}" ;;
   *) echo "unexpected gh call: $*" >&2; exit 64 ;;
 esac
@@ -126,6 +127,8 @@ elif [[ "\${args}" == *"/reactions"* ]]; then
   printf '%s\n' "\${MOCK_REACTIONS_JSON:-[[]]}"
 elif [[ "\${args}" == *"/issues/comments/"* ]]; then
   printf '%s\n' "\${MOCK_COMMENT_JSON}"
+elif [[ "\${args}" == *"/collaborators/"*"/permission"* ]]; then
+  printf '%s\n' "\${MOCK_PERMISSION:-write}"
 elif [[ "\${args}" == *"/pulls/"* ]]; then
   printf '%s\n' "\${MOCK_PR_JSON}"
 else
@@ -152,6 +155,8 @@ elif [[ "\${args}" == *"/issues/17/comments?"* ]]; then
 elif [[ "\${args}" == *"--method POST"* && "\${args}" == *"/issues/17/comments"* ]]; then
   printf '{"id":99}\n'
 elif [[ "\${args}" == *"--method PATCH"* && "\${args}" == *"/issues/comments/"* ]]; then
+  printf '{}\n'
+elif [[ "\${args}" == *"--method POST"* && "\${args}" == *"/statuses/"* ]]; then
   printf '{}\n'
 else
   echo "unexpected gh call: \${args}" >&2
@@ -180,6 +185,8 @@ printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
 if [[ "$*" == *"/pulls/17"* ]]; then
   printf '%s\n' "\${HEAD_SHA}"
 elif [[ "$*" == *"--method PATCH"* && "$*" == *"/issues/comments/99"* ]]; then
+  printf '{}\n'
+elif [[ "$*" == *"--method POST"* && "$*" == *"/statuses/"* ]]; then
   printf '{}\n'
 else
   echo "unexpected gh call: $*" >&2
@@ -213,6 +220,9 @@ function contextEnv(overrides = {}) {
     TRIGGER_ACTOR: "alice",
     EVENT_NAME: "pull_request_target",
     EVENT_ACTION: "synchronize",
+    AUTOMATIC_BASE_REFS: "main",
+    MANUAL_BASE_REFS: "*",
+    MOCK_PERMISSION: "write",
     ...overrides,
   };
 }
@@ -233,11 +243,11 @@ function prFixture({
   });
 }
 
-function automaticEvent(headSha) {
+function automaticEvent(headSha, baseRef = "main") {
   return {
     pull_request: {
       number: 17,
-      base: { ref: "main" },
+      base: { ref: baseRef },
       head: { sha: headSha, repo: { full_name: "Abrikosov-group/project" } },
       draft: false,
     },
@@ -282,8 +292,13 @@ function statusEnv(overrides = {}) {
     COMMAND_COMMENT_ID: "91",
     COMMENT_ID: "91",
     TRIGGER: "manual",
+    MODE: "all",
     HEAD_SHA: "b".repeat(40),
     RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+    REACTION_GH_TOKEN: "test-reaction-token",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
+    REVIEW_GATE_CONTEXT: "",
     ...overrides,
   };
 }
@@ -294,12 +309,14 @@ test("организационный workflow запускает только Co
   assert.doesNotMatch(workflow, /@codex review/u);
   assert.doesNotMatch(workflow, /\/gemini\s+review/iu);
   assert.doesNotMatch(workflow, /gemini_url|dispatch-gemini/iu);
-  assert.doesNotMatch(workflow, /\/review-claude/u);
+  assert.match(workflow, /\/review-all/u);
+  assert.match(workflow, /\/review-claude/u);
 });
 
-test("Codex использует подписочный Spark xhigh на защищённом Runner", () => {
-  assert.match(workflow, /group: codex-spark-review/u);
-  assert.match(workflow, /EXPECTED_RUNNER_NAME: codex-spark-review-187-127-26-1/u);
+test("Codex использует подписочный Spark xhigh на настраиваемом защищённом Runner", () => {
+  const codexJob = extractJob(workflow, "analyze-codex");
+  assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);
+  assert.match(workflow, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_codex_runner_name \}\}/u);
   assert.match(workflow, /codex login status/u);
   assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
   assert.match(workflow, /model_reasoning_effort="xhigh"/u);
@@ -311,6 +328,56 @@ test("Codex использует подписочный Spark xhigh на защ�
     /REVIEW_DISPATCH_TOKEN:\n\s+description: Устаревший совместимый секрет; новое ревью его не использует\n\s+required: false/u,
   );
   assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
+});
+
+test("все jobs закреплены одновременно за runner group, label и точным именем", () => {
+  const serviceJobs = [
+    "context",
+    "start-status",
+    "prepare-codex",
+    "publish-codex",
+    "publish-claude",
+    "finish-status",
+  ];
+  const modelJobs = [
+    ["analyze-codex", "codex_runner_label", "expected_codex_runner_name", "Codex"],
+    ["analyze-claude", "claude_runner_label", "expected_claude_runner_name", "Claude"],
+  ];
+
+  for (const input of [
+    "review_runner_group",
+    "orchestration_runner_label",
+    "codex_runner_label",
+    "claude_runner_label",
+    "expected_orchestration_runner_name",
+    "expected_codex_runner_name",
+    "expected_claude_runner_name",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`${input}:\\n\\s+description: [^\\n]+\\n\\s+required: true\\n\\s+type: string`, "u"),
+    );
+  }
+
+  for (const jobId of serviceJobs) {
+    const job = extractJob(workflow, jobId);
+    assert.match(job, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.orchestration_runner_label \}\}/u);
+    assert.match(job, /steps:\n\s+- name: Проверить доверенный Runner оркестрации/u);
+    assert.match(job, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_orchestration_runner_name \}\}/u);
+  }
+
+  for (const [jobId, labelInput, nameInput, displayName] of modelJobs) {
+    const job = extractJob(workflow, jobId);
+    assert.match(
+      job,
+      new RegExp(`runs-on:\\n\\s+group: \\$\\{\\{ inputs\\.review_runner_group \\}\\}\\n\\s+labels: \\$\\{\\{ inputs\\.${labelInput} \\}\\}`, "u"),
+    );
+    assert.match(job, new RegExp(`steps:\\n\\s+- name: Проверить доверенный Runner ${displayName}`, "u"));
+    assert.match(job, new RegExp(`EXPECTED_RUNNER_NAME: \\$\\{\\{ inputs\\.${nameInput} \\}\\}`, "u"));
+  }
+
+  assert.doesNotMatch(workflow, /runs-on: \$\{\{ inputs\.[a-z_]+_runner_label \}\}/u);
+  assert.doesNotMatch(workflow, /runs-on: (?:ubuntu|windows|macos)-/u);
 });
 
 test("точный diff строится от доказанного merge base", () => {
@@ -382,6 +449,7 @@ test("Claude не получает инструменты записи, shell и
   assert.match(workflow, /--tools "Read"/u);
   assert.match(workflow, /--disallowedTools "[^"]*Bash[^"]*WebFetch[^"]*WebSearch"/u);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/u);
+  assert.match(workflow, /Не включай HTML-теги, HTML-комментарии или служебные маркеры/u);
 });
 
 test("Claude запускается из точного доверенного Base checkout", () => {
@@ -552,7 +620,7 @@ test("повторный API-запрос не доверяет фактичес
   assert.match(result.stdout, /Фактический автор комментария не имеет права/u);
 });
 
-test("[3] автоматический запуск вне main и из форка запрещён в обоих слоях", () => {
+test("[3] автоматический запуск вне разрешённых веток и из форка запрещён", () => {
   const headSha = "e".repeat(40);
   for (const source of [caller, organizationCaller]) {
     const automaticJob = extractJob(source, "automatic-review");
@@ -563,9 +631,15 @@ test("[3] автоматический запуск вне main и из форк
     );
   }
 
-  for (const prJson of [
-    prFixture({ baseRef: "develop", headSha }),
-    prFixture({ headSha, headRepository: "contributor/project" }),
+  for (const { prJson, expectedError } of [
+    {
+      prJson: prFixture({ baseRef: "develop", headSha }),
+      expectedError: /Base-ветка develop не разрешена/u,
+    },
+    {
+      prJson: prFixture({ headSha, headRepository: "contributor/project" }),
+      expectedError: /только для ветки этого репозитория/u,
+    },
   ]) {
     const result = executeRunScript({
       stepName: "Проверить источник запуска",
@@ -574,8 +648,21 @@ test("[3] автоматический запуск вне main и из форк
       env: contextEnv({ EXPECTED_HEAD_SHA: headSha, MOCK_PR_JSON: prJson }),
     });
     assert.notEqual(result.status, 0);
-    assert.match(result.stdout, /Автоматическое ревью разрешено только для main/u);
+    assert.match(result.stdout, expectedError);
   }
+
+  const stagingResult = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent(headSha, "staging"),
+    env: contextEnv({
+      EXPECTED_HEAD_SHA: headSha,
+      AUTOMATIC_BASE_REFS: "main,staging",
+      MOCK_PR_JSON: prFixture({ baseRef: "staging", headSha }),
+    }),
+  });
+  assert.equal(stagingResult.status, 0, stagingResult.stderr);
+  assert.match(stagingResult.outputs, /^base_ref=staging$/mu);
 });
 
 test("[7–10] центральная очередь едина для manual и automatic одного PR", () => {
@@ -590,13 +677,47 @@ test("[7–10] центральная очередь едина для manual и
       "  queue: max",
     ].join("\n"),
   );
-  assert.doesNotMatch(concurrency, /inputs\.trigger|inputs\.comment_id/u);
+  assert.doesNotMatch(concurrency, /inputs\.trigger/u);
+  assert.doesNotMatch(concurrency, /inputs\.comment_id|head_sha/u);
 });
 
-test("ограничения main и same-repo применяются только к автоматическому запуску", () => {
+test("новый automatic-запуск не отменяет ручной review-all", () => {
+  const concurrency = workflow.match(/\nconcurrency:\n[\s\S]*?\n\njobs:/u)?.[0];
+  assert.ok(concurrency);
+  assert.match(concurrency, /cancel-in-progress: false/u);
+  assert.doesNotMatch(concurrency, /cancel-in-progress:.*automatic/u);
+});
+
+test("GitHub App сам определяет login доверенного издателя", () => {
+  const result = executeRunScript({
+    stepName: "Определить доверенного издателя",
+    ghMock: contextGhMock,
+    env: {
+      APP_CLIENT_ID: "Iv23example",
+      APP_SLUG: "abrikosov-review-gate-publisher",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, /^login=abrikosov-review-gate-publisher\[bot\]$/mu);
+  assert.match(workflow, /client-id: \$\{\{ inputs\.review_gate_app_client_id \}\}/u);
+
+  const fallback = executeRunScript({
+    stepName: "Определить доверенного издателя",
+    ghMock: contextGhMock,
+    env: {
+      APP_CLIENT_ID: "",
+      APP_SLUG: "",
+    },
+  });
+  assert.equal(fallback.status, 0, fallback.stderr);
+  assert.match(fallback.outputs, /^login=github-actions\[bot\]$/mu);
+  assert.doesNotMatch(workflow, /review_publisher_login|FALLBACK_LOGIN/u);
+});
+
+test("разрешённые base-ветки параметризованы, а same-repo обязателен для автозапуска", () => {
   assert.match(
     workflow,
-    /if \[\[ "\$\{TRIGGER\}" == "automatic" &&\s+\("\$\{base_ref\}" != "main" \|\| "\$\{head_repository\}" != "\$\{REPOSITORY\}"\) \]\]/u,
+    /base_ref_allowed "\$\{allowed_base_refs\}" "\$\{base_ref\}"/u,
   );
   assert.match(
     workflow,
@@ -604,8 +725,9 @@ test("ограничения main и same-repo применяются тольк
   );
   assert.doesNotMatch(
     workflow,
-    /if \[\[ "\$\{base_ref\}" != "main" \|\| "\$\{head_repository\}" != "\$\{REPOSITORY\}"/u,
+    /"\$\{base_ref\}" != "main"/u,
   );
+  assert.match(workflow, /"\$\{head_repository\}" != "\$\{REPOSITORY\}"/u);
 });
 
 test("автоматический источник закрепляет точный Head готового PR", () => {
@@ -616,6 +738,22 @@ test("автоматический источник закрепляет точ�
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
   assert.match(workflow, /выбран текущий Head \$\{head_sha\}/u);
   assert.doesNotMatch(workflow, /Head PR изменился после автоматического события/u);
+});
+
+test("bot-login с фактическим write-доступом проходит проверку прав", () => {
+  const headSha = "e".repeat(40);
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent(headSha),
+    env: contextEnv({
+      EXPECTED_HEAD_SHA: headSha,
+      TRIGGER_ACTOR: "dependabot[bot]",
+      MOCK_PERMISSION: "write",
+      MOCK_PR_JSON: prFixture({ headSha }),
+    }),
+  });
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("дорогие этапы ревью ограничены по времени", () => {
@@ -734,12 +872,12 @@ test("[11] два существующих маркера не запускаю�
     {
       id: 101,
       user: { login: "github-actions[bot]" },
-      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
     },
     {
       id: 102,
       user: { login: "github-actions[bot]" },
-      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
     },
   ]]);
   const commonEnv = {
@@ -747,6 +885,9 @@ test("[11] два существующих маркера не запускаю�
     PR_NUMBER: "17",
     BASE_SHA: baseSha,
     HEAD_SHA: headSha,
+    TRIGGER: "automatic",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
     MOCK_PR_JSON: prFixture({ baseSha, headSha }),
     MOCK_REVIEWS_JSON: reviews,
   };
@@ -783,14 +924,20 @@ test("[11] два существующих маркера не запускаю�
       PR_NUMBER: "17",
       STATUS_COMMENT_ID: "99",
       HEAD_SHA: headSha,
+      MODE: "all",
       RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
       CODEX_PREPARE_RESULT: "success",
       CODEX_REVIEW_NEEDED: "false",
       CODEX_ANALYZE_RESULT: "skipped",
       CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "0",
       CLAUDE_ANALYZE_RESULT: "success",
       CLAUDE_REVIEW_NEEDED: "false",
       CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      REVIEW_GATE_CONTEXT: "",
     },
   });
   assert.equal(finish.status, 0, finish.stderr);
@@ -799,17 +946,246 @@ test("[11] два существующих маркера не запускаю�
   assert.match(finish.ghLog, /Claude Sonnet 5.*актуальное ревью уже существует/u);
 });
 
+test("повторно использованное ревью с P0–P2 не может сделать gate зелёным", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const reviews = JSON.stringify([[
+    {
+      id: 201,
+      user: { login: "github-actions[bot]" },
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->`,
+    },
+    {
+      id: 202,
+      user: { login: "github-actions[bot]" },
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+    },
+  ]]);
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    BASE_SHA: baseSha,
+    HEAD_SHA: headSha,
+    TRIGGER: "automatic",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
+    MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+    MOCK_REVIEWS_JSON: reviews,
+  };
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: commonEnv,
+  });
+  const claude = executeRunScript({
+    stepName: "Не расходовать квоту повторно для того же снимка",
+    ghMock: markerGhMock,
+    env: commonEnv,
+  });
+  assert.match(codex.outputs, /^blocking_findings=1$/mu);
+  assert.match(claude.outputs, /^blocking_findings=0$/mu);
+
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      HEAD_SHA: headSha,
+      MODE: "all",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      CODEX_PREPARE_RESULT: "success",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "1",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "false",
+      CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
+    },
+  });
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.ghLog, /Блокирующих замечаний P0–P2: \*\*1\*\*/u);
+  assert.match(finish.ghLog, /--raw-field state=failure/u);
+  assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
+});
+
+test("ручное ревью Claude с P0–P2 не показывает зелёный итог", () => {
+  const headSha = "b".repeat(40);
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      HEAD_SHA: headSha,
+      MODE: "claude",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      CODEX_PREPARE_RESULT: "skipped",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "true",
+      CLAUDE_PUBLISH_RESULT: "success",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "1",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "",
+      REVIEW_GATE_CONTEXT: "",
+    },
+  });
+
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.ghLog, /ИИ-ревью требует внимания/u);
+  assert.match(finish.ghLog, /Блокирующих замечаний P0–P2: \*\*1\*\*/u);
+  assert.doesNotMatch(finish.ghLog, /✅ Ручное ревью Claude завершено/u);
+});
+
+test("старое ревью без доверенных метрик запускает модель повторно", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    BASE_SHA: baseSha,
+    HEAD_SHA: headSha,
+    TRIGGER: "automatic",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
+    MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+    MOCK_REVIEWS_JSON: JSON.stringify([[
+      {
+        id: 301,
+        user: { login: "github-actions[bot]" },
+        body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      },
+    ]]),
+  };
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: commonEnv,
+  });
+  assert.equal(codex.status, 0, codex.stderr);
+  assert.match(codex.outputs, /^needed=true$/mu);
+  assert.match(codex.stdout, /не содержит доверенных метрик/u);
+});
+
+test("повторяющиеся и небезопасные метрики не считаются доверенными", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const cases = [
+    {
+      stepName: "Проверить дубликат и подготовить вход модели",
+      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      commandMocks: { git: gitHeadMock },
+    },
+    {
+      stepName: "Не расходовать квоту повторно для того же снимка",
+      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      commandMocks: {},
+    },
+  ];
+  const metricBodies = [
+    "<!-- review-findings:P0=0;P1=0;P2=0 -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->",
+    "<!-- review-findings:P0=9007199254740992;P1=0;P2=0 -->",
+  ];
+
+  for (const { stepName, marker, commandMocks } of cases) {
+    for (const metrics of metricBodies) {
+      const result = executeRunScript({
+        stepName,
+        ghMock: markerGhMock,
+        commandMocks,
+        env: {
+          REPOSITORY: "Abrikosov-group/project",
+          PR_NUMBER: "17",
+          BASE_SHA: baseSha,
+          HEAD_SHA: headSha,
+          TRIGGER: "automatic",
+          REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+          REUSE_EXISTING_REVIEWS: "true",
+          MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+          MOCK_REVIEWS_JSON: JSON.stringify([[
+            {
+              id: 302,
+              user: { login: "github-actions[bot]" },
+              body: `${marker}\n${metrics}`,
+            },
+          ]]),
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.outputs, /^needed=true$/mu);
+      assert.doesNotMatch(result.outputs, /^blocking_findings=/mu);
+    }
+  }
+});
+
+test("из нескольких ручных ревью одного SHA gate берёт самое новое", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const codexMarker = `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`;
+  const codex = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock },
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      BASE_SHA: baseSha,
+      HEAD_SHA: headSha,
+      TRIGGER: "automatic",
+      REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+      REUSE_EXISTING_REVIEWS: "true",
+      MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+      MOCK_REVIEWS_JSON: JSON.stringify([[
+        {
+          id: 401,
+          user: { login: "github-actions[bot]" },
+          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=1;P2=0 -->`,
+        },
+        {
+          id: 402,
+          user: { login: "github-actions[bot]" },
+          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+        },
+      ]]),
+    },
+  });
+  assert.equal(codex.status, 0, codex.stderr);
+  assert.match(codex.outputs, /^blocking_findings=0$/mu);
+});
+
+test("ручной запуск и отключённое переиспользование принудительно публикуют новое ревью", () => {
+  for (const jobId of ["publish-codex", "publish-claude"]) {
+    assert.match(
+      extractJob(workflow, jobId),
+      /FORCE_REVIEW: \$\{\{ needs\.context\.outputs\.trigger == 'manual' \|\| inputs\.reuse_existing_reviews == false \}\}/u,
+    );
+  }
+});
+
 test("[12] любой один маркер запускает только отсутствующую модель", () => {
   const baseSha = "a".repeat(40);
   const headSha = "b".repeat(40);
   const cases = [
     {
-      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
       codexNeeded: "false",
       claudeNeeded: "true",
     },
     {
-      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
       codexNeeded: "true",
       claudeNeeded: "false",
     },
@@ -821,6 +1197,9 @@ test("[12] любой один маркер запускает только от
       PR_NUMBER: "17",
       BASE_SHA: baseSha,
       HEAD_SHA: headSha,
+      TRIGGER: "automatic",
+      REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+      REUSE_EXISTING_REVIEWS: "true",
       MOCK_PR_JSON: prFixture({ baseSha, headSha }),
       MOCK_REVIEWS_JSON: JSON.stringify([[
         { id: 101, user: { login: "github-actions[bot]" }, body: marker },
@@ -1017,7 +1396,9 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(startStatus, /echo "comment_id=\$\{comment_id\}"/u);
   assert.match(finishStatus, /always\(\)/u);
   assert.match(finishStatus, /Двойное ИИ-ревью завершено/u);
-  assert.match(finishStatus, /Двойное ИИ-ревью требует внимания/u);
+  assert.match(finishStatus, /ИИ-ревью требует внимания/u);
+  assert.match(finishStatus, /Блокирующих замечаний P0–P2/u);
+  assert.match(finishStatus, /statuses\/\$\{HEAD_SHA\}/u);
   assert.match(finishStatus, /current_head_sha/u);
   assert.match(finishStatus, /Статус не обновляется: PR уже содержит более новый commit/u);
   assert.match(finishStatus, /--method PATCH/u);

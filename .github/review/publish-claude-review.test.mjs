@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,8 +10,10 @@ import {
   collectDiffAnchors,
   collectDiffLines,
   main,
+  partitionFindingAnchors,
   reviewNeeded,
   reviewMarker,
+  trustedReviewBlockingFindings,
   validateFindingAnchors,
   validateReviewJson,
 } from "./publish-claude-review.mjs";
@@ -21,6 +23,10 @@ const HEAD_SHA = "2".repeat(40);
 const STANDARD_MODEL = "claude-sonnet-5";
 const DEEP_MODEL = "claude-opus-5";
 const SPARK_MODEL = "gpt-5.3-codex-spark";
+
+function findingsMarker({ p0 = 0, p1 = 0, p2 = 0 } = {}) {
+  return `<!-- review-findings:P0=${p0};P1=${p1};P2=${p2} -->`;
+}
 
 function fileDiff({ oldPath = "src/example.ts", newPath = "src/example.ts", hunk }) {
   return [
@@ -54,16 +60,19 @@ async function runMainWithFetch(fetchImplementation, environmentOverrides = {}) 
   );
   const previousFetch = globalThis.fetch;
   const previousLog = console.log;
+  const previousWarn = console.warn;
 
   Object.assign(process.env, environment);
   globalThis.fetch = fetchImplementation;
   console.log = () => {};
+  console.warn = () => {};
 
   try {
     await main();
   } finally {
     globalThis.fetch = previousFetch;
     console.log = previousLog;
+    console.warn = previousWarn;
     for (const [key, value] of previousEnvironment) {
       if (value === undefined) {
         delete process.env[key];
@@ -112,6 +121,12 @@ test("отклоняет неизвестные поля и обход пути"
   const review = validReview();
   review.findings[0].path = "../secret";
   assert.throws(() => validateReviewJson(review), /Недопустимый путь/u);
+});
+
+test("отклоняет неизвестную сторону до разбора привязок", () => {
+  const review = validReview();
+  review.findings[0].side = "CENTER";
+  assert.throws(() => validateReviewJson(review), /side должен быть LEFT или RIGHT/u);
 });
 
 test("отклоняет дубли одной строки и похожие на секреты строки", () => {
@@ -202,6 +217,32 @@ test("принимает finding только на изменённой стор
   validateFindingAnchors(
     review.findings,
     fileDiff({ hunk: "@@ -8,1 +12,1 @@\n-old\n+added" }),
+  );
+});
+
+test("неизвестный путь безопасно классифицируется как unanchored", () => {
+  const finding = validReview().findings[0];
+  finding.path = "src/missing.ts";
+
+  const partition = partitionFindingAnchors(
+    [finding],
+    fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+added" }),
+  );
+
+  assert.deepEqual(partition.anchored, []);
+  assert.deepEqual(partition.unanchored, [finding]);
+});
+
+test("доверяет ровно одному корректному маркеру метрик", () => {
+  assert.equal(trustedReviewBlockingFindings({ body: findingsMarker({ p1: 2, p2: 1 }) }), 3);
+  assert.equal(trustedReviewBlockingFindings({ body: "legacy review" }), null);
+  assert.equal(
+    trustedReviewBlockingFindings({ body: `${findingsMarker()}\n${findingsMarker({ p1: 1 })}` }),
+    null,
+  );
+  assert.equal(
+    trustedReviewBlockingFindings({ body: findingsMarker({ p0: "9007199254740992" }) }),
+    null,
   );
 });
 
@@ -324,7 +365,11 @@ test("до запуска Claude пропускает дубликат и уст
     if (duplicateCalls.length === 1) {
       return jsonResponse(currentPullRequest);
     }
-    return jsonResponse([{ user: { login: "github-actions[bot]" }, body: marker }]);
+    return jsonResponse([{
+      id: 10,
+      user: { login: "github-actions[bot]" },
+      body: `${marker}\n${findingsMarker()}`,
+    }]);
   }, () => reviewNeeded(context));
   assert.equal(duplicateNeeded, false);
   assert.equal(duplicateCalls.length, 2);
@@ -344,6 +389,52 @@ test("до запуска Claude пропускает дубликат и уст
   }, () => reviewNeeded(context));
   assert.equal(staleNeeded, false);
   assert.equal(staleCalls.length, 1);
+
+  const appDuplicateCalls = [];
+  const appDuplicateNeeded = await withFetch(async (url) => {
+    appDuplicateCalls.push(String(url));
+    if (appDuplicateCalls.length === 1) {
+      return jsonResponse(currentPullRequest);
+    }
+    return jsonResponse([{
+      user: { login: "abrikosov-review-gate-publisher[bot]" },
+      id: 10,
+      body: `${marker}\n${findingsMarker()}`,
+    }]);
+  }, () => reviewNeeded({
+    ...context,
+    publisherLogin: "abrikosov-review-gate-publisher[bot]",
+  }));
+  assert.equal(appDuplicateNeeded, false);
+
+  const legacyNeeded = await withFetch(async (url) => {
+    if (String(url).endsWith("/pulls/55")) {
+      return jsonResponse(currentPullRequest);
+    }
+    return jsonResponse([{ id: 11, user: { login: "github-actions[bot]" }, body: marker }]);
+  }, () => reviewNeeded(context));
+  assert.equal(legacyNeeded, true);
+
+  const latestLegacyNeeded = await withFetch(async (url) => {
+    if (String(url).endsWith("/pulls/55")) {
+      return jsonResponse(currentPullRequest);
+    }
+    return jsonResponse([
+      {
+        id: 12,
+        user: { login: "github-actions[bot]" },
+        body: `${marker}\n${findingsMarker()}`,
+      },
+      { id: 13, user: { login: "github-actions[bot]" }, body: marker },
+    ]);
+  }, () => reviewNeeded(context));
+  assert.equal(latestLegacyNeeded, true);
+
+  const forcedNeeded = await withFetch(
+    async () => jsonResponse(currentPullRequest),
+    () => reviewNeeded({ ...context, forceReview: true }),
+  );
+  assert.equal(forcedNeeded, true);
 });
 
 test("публикует итог и comments одним API-запросом после тройной проверки SHA", async () => {
@@ -408,6 +499,55 @@ test("проверяет inline comments по точному diff из дове�
   assert.equal(payload.comments[0].line, 12);
 });
 
+test("публикует замечание с неверной привязкой в итоге и сохраняет его в метриках", async () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-unanchored-"));
+  const diffPath = join(temporaryDirectory, "pull-request.diff");
+  const outputPath = join(temporaryDirectory, "github-output.txt");
+  writeFileSync(diffPath, fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+added" }));
+  writeFileSync(outputPath, "");
+
+  const review = validReview();
+  review.findings.push({
+    ...review.findings[0],
+    priority: "P2",
+    line: 13,
+    title: "Замечание указано на неизменённой строке",
+  });
+  const partition = partitionFindingAnchors(review.findings, readFileSync(diffPath, "utf8"));
+  assert.equal(partition.anchored.length, 1);
+  assert.equal(partition.unanchored.length, 1);
+
+  const calls = [];
+  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  try {
+    await runMainWithFetch(async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (calls.length === 1 || calls.length === 3 || calls.length === 5) {
+        return jsonResponse(currentPullRequest);
+      }
+      if (calls.length === 2) {
+        return jsonResponse([]);
+      }
+      return jsonResponse({
+        id: 47,
+        html_url: "https://github.com/example/sawabook/pull/55#review-with-unanchored",
+      });
+    }, {
+      REVIEW_JSON: JSON.stringify(review),
+      DIFF_PATH: diffPath,
+      GITHUB_OUTPUT: outputPath,
+    });
+
+    const payload = JSON.parse(calls[3].options.body);
+    assert.equal(payload.comments.length, 1);
+    assert.match(payload.body, /<!-- review-findings:P0=0;P1=1;P2=1 -->/u);
+    assert.match(payload.body, /Замечания без корректной привязки/u);
+    assert.match(readFileSync(outputPath, "utf8"), /^blocking_findings=2$/mu);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("не публикует повторное ревью того же diff", async () => {
   const calls = [];
   const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
@@ -420,7 +560,8 @@ test("не публикует повторное ревью того же diff",
     return jsonResponse([
       {
         user: { login: "github-actions[bot]" },
-        body: marker,
+        id: 20,
+        body: `${marker}\n${findingsMarker({ p1: 1 })}`,
         html_url: "https://github.com/example/sawabook/pull/55#existing-review",
       },
     ]);
@@ -428,6 +569,64 @@ test("не публикует повторное ревью того же diff",
 
   assert.equal(calls.length, 2);
   assert.equal(calls.some((call) => call.options.method === "POST"), false);
+});
+
+test("переиздаёт legacy-ревью без доверенных метрик", async () => {
+  const calls = [];
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
+  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+
+  await runMainWithFetch(async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (calls.length === 1 || calls.length === 3 || calls.length === 5) {
+      return jsonResponse(currentPullRequest);
+    }
+    if (calls.length === 2) {
+      return jsonResponse([{
+        id: 21,
+        user: { login: "github-actions[bot]" },
+        body: marker,
+        html_url: "https://github.com/example/sawabook/pull/55#legacy-review",
+      }]);
+    }
+    return jsonResponse({
+      id: 22,
+      html_url: "https://github.com/example/sawabook/pull/55#replacement-review",
+    });
+  });
+
+  assert.equal(calls.length, 5);
+  assert.equal(calls[3].options.method, "POST");
+  assert.match(JSON.parse(calls[3].options.body).body, /<!-- review-findings:/u);
+});
+
+test("ручной запуск публикует новое ревью даже для уже проверенного SHA", async () => {
+  const calls = [];
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
+  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+
+  await runMainWithFetch(async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (calls.length === 1 || calls.length === 3 || calls.length === 5) {
+      return jsonResponse(currentPullRequest);
+    }
+    if (calls.length === 2) {
+      return jsonResponse([{
+        user: { login: "abrikosov-review-gate-publisher[bot]" },
+        body: marker,
+      }]);
+    }
+    return jsonResponse({
+      id: 99,
+      html_url: "https://github.com/example/sawabook/pull/55#forced-review",
+    });
+  }, {
+    FORCE_REVIEW: "true",
+    REVIEW_PUBLISHER_LOGIN: "abrikosov-review-gate-publisher[bot]",
+  });
+
+  assert.equal(calls.length, 5);
+  assert.equal(calls[3].options.method, "POST");
 });
 
 test("публикует Opus после Sonnet для того же diff", async () => {
@@ -461,40 +660,51 @@ test("публикует Opus после Sonnet для того же diff", asyn
   assert.match(payload.body, /Claude Opus 5/u);
 });
 
-test("[6] помечает опубликованное ревью устаревшим при гонке Head SHA", async () => {
+test("[6] помечает опубликованное ревью устаревшим при гонке Base SHA и падает закрыто", async () => {
   const calls = [];
   const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
-  const changedPullRequest = { base: { sha: BASE_SHA }, head: { sha: "3".repeat(40) } };
+  const changedPullRequest = { base: { sha: "3".repeat(40) }, head: { sha: HEAD_SHA } };
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "review-stale-output-"));
+  const outputPath = join(temporaryDirectory, "github-output.txt");
+  writeFileSync(outputPath, "", "utf8");
 
-  await runMainWithFetch(async (url, options) => {
-    calls.push({ url: String(url), options });
-    if (calls.length === 1 || calls.length === 3) {
-      return jsonResponse(currentPullRequest);
-    }
-    if (calls.length === 2) {
-      return jsonResponse([]);
-    }
-    if (calls.length === 4) {
-      return jsonResponse({
-        id: 44,
-        html_url: "https://github.com/example/sawabook/pull/55#stale-review",
-      });
-    }
-    if (calls.length === 5) {
-      return jsonResponse(changedPullRequest);
-    }
-    return jsonResponse({ id: 44, body: JSON.parse(options.body).body });
-  });
+  try {
+    await assert.rejects(
+      runMainWithFetch(async (url, options) => {
+        calls.push({ url: String(url), options });
+        if (calls.length === 1 || calls.length === 3) {
+          return jsonResponse(currentPullRequest);
+        }
+        if (calls.length === 2) {
+          return jsonResponse([]);
+        }
+        if (calls.length === 4) {
+          return jsonResponse({
+            id: 44,
+            html_url: "https://github.com/example/sawabook/pull/55#stale-review",
+          });
+        }
+        if (calls.length === 5) {
+          return jsonResponse(changedPullRequest);
+        }
+        return jsonResponse({ id: 44, body: JSON.parse(options.body).body });
+      }, { GITHUB_OUTPUT: outputPath }),
+      /устаревшее ревью не считается успешно опубликованным/u,
+    );
 
-  assert.equal(calls.length, 6);
-  assert.equal(calls[5].options.method, "PUT");
-  assert.match(calls[5].url, /\/pulls\/55\/reviews\/44$/u);
-  const stalePayload = JSON.parse(calls[5].options.body);
-  assert.equal(
-    stalePayload.body,
-    buildStaleReviewBody(BASE_SHA, HEAD_SHA, STANDARD_MODEL),
-  );
-  assert.match(stalePayload.body, /Ревью Claude устарело/u);
+    assert.equal(calls.length, 6);
+    assert.equal(calls[5].options.method, "PUT");
+    assert.match(calls[5].url, /\/pulls\/55\/reviews\/44$/u);
+    const stalePayload = JSON.parse(calls[5].options.body);
+    assert.equal(
+      stalePayload.body,
+      buildStaleReviewBody(BASE_SHA, HEAD_SHA, STANDARD_MODEL),
+    );
+    assert.match(stalePayload.body, /Ревью Claude устарело/u);
+    assert.equal(readFileSync(outputPath, "utf8"), "");
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("[5] не публикует результат для устаревшего Head SHA", async () => {
