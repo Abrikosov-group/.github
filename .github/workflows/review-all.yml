@@ -9,7 +9,7 @@ name: Организационное двойное ИИ-ревью
         default: manual
         type: string
       command:
-        description: Команда ревью; поддерживается только /review-all
+        description: Команда ревью — /review-all или /review-claude
         required: true
         type: string
       repository:
@@ -35,6 +35,61 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: ""
         type: string
+      automatic_base_refs:
+        description: Разрешённые base-ветки автозапуска через запятую
+        required: false
+        default: main
+        type: string
+      manual_base_refs:
+        description: Разрешённые base-ветки ручного запуска; * разрешает любую
+        required: false
+        default: "*"
+        type: string
+      orchestration_runner_label:
+        description: Runner label для подготовки, публикации и статусов
+        required: false
+        default: ubuntu-24.04
+        type: string
+      codex_runner_label:
+        description: Runner label для анализа Codex
+        required: false
+        default: codex-spark-review
+        type: string
+      claude_runner_label:
+        description: Runner label для анализа Claude
+        required: false
+        default: ubuntu-24.04
+        type: string
+      expected_codex_runner_name:
+        description: Точное имя доверенного runner Codex
+        required: false
+        default: codex-spark-review-187-127-26-1
+        type: string
+      expected_claude_runner_name:
+        description: Точное имя доверенного runner Claude; пустое отключает проверку имени
+        required: false
+        default: ""
+        type: string
+      review_publisher_login:
+        description: GitHub login доверенного издателя ревью
+        required: false
+        default: "github-actions[bot]"
+        type: string
+      reuse_existing_reviews:
+        description: Не запускать модель повторно, если для SHA уже есть ревью
+        required: false
+        default: true
+        type: boolean
+      review_gate_context:
+        description: Имя commit status двойного ревью; пустое отключает status
+        required: false
+        default: ""
+        type: string
+      review_gate_app_client_id:
+        description: Client ID GitHub App издателя; пустое использует github.token
+        required: false
+        default: ""
+        type: string
     secrets:
       REVIEW_DISPATCH_TOKEN:
         description: Устаревший совместимый секрет; новое ревью его не использует
@@ -42,18 +97,20 @@ name: Организационное двойное ИИ-ревью
       CLAUDE_CODE_OAUTH_TOKEN:
         description: Подписочный OAuth-токен Claude Code
         required: true
+      REVIEW_GATE_APP_PRIVATE_KEY:
+        description: Private key GitHub App доверенного издателя
+        required: false
 
 permissions: {}
 
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
-  cancel-in-progress: false
-  queue: max
+  cancel-in-progress: ${{ inputs.trigger == 'automatic' }}
 
 jobs:
   context:
     name: Проверить запуск и зафиксировать PR
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 3
     permissions:
       contents: read
@@ -64,6 +121,7 @@ jobs:
       base_sha: ${{ steps.pr.outputs.base_sha }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
       trigger: ${{ steps.pr.outputs.trigger }}
+      mode: ${{ steps.pr.outputs.mode }}
     env:
       GH_TOKEN: ${{ github.token }}
       CALLER_REPOSITORY: ${{ github.repository }}
@@ -77,6 +135,8 @@ jobs:
       TRIGGER_ACTOR: ${{ github.actor }}
       EVENT_NAME: ${{ github.event_name }}
       EVENT_ACTION: ${{ github.event.action }}
+      AUTOMATIC_BASE_REFS: ${{ inputs.automatic_base_refs }}
+      MANUAL_BASE_REFS: ${{ inputs.manual_base_refs }}
 
     steps:
       - name: Проверить источник запуска
@@ -94,8 +154,55 @@ jobs:
             echo "::error::GitHub передал некорректный номер PR"
             exit 1
           fi
-          if [[ "${COMMAND}" != "/review-all" ]]; then
-            echo "::error::Поддерживается только команда /review-all"
+          case "${COMMAND}" in
+            /review-all) mode="all" ;;
+            /review-claude) mode="claude" ;;
+            *)
+              echo "::error::Поддерживаются только команды /review-all и /review-claude"
+              exit 1
+              ;;
+          esac
+
+          validate_base_refs() {
+            local refs="$1"
+            [[ "${refs}" == "*" ||
+               "${refs}" =~ ^[A-Za-z0-9._/-]+(,[A-Za-z0-9._/-]+)*$ ]]
+          }
+
+          base_ref_allowed() {
+            local refs="$1"
+            local candidate="$2"
+            local ref
+            [[ "${refs}" == "*" ]] && return 0
+            IFS=',' read -r -a allowed_refs <<< "${refs}"
+            for ref in "${allowed_refs[@]}"; do
+              [[ "${candidate}" == "${ref}" ]] && return 0
+            done
+            return 1
+          }
+
+          require_write_permission() {
+            local login="$1"
+            local permission
+            if [[ ! "${login}" =~ ^[A-Za-z0-9-]+$ ]]; then
+              echo "::error::GitHub login инициатора имеет недопустимый формат"
+              exit 1
+            fi
+            permission="$(gh api \
+              "repos/${REPOSITORY}/collaborators/${login}/permission" \
+              --jq '.permission')"
+            case "${permission}" in
+              admin|maintain|write) ;;
+              *)
+                echo "::error::Инициатор ${login} не имеет доступа write к репозиторию"
+                exit 1
+                ;;
+            esac
+          }
+
+          if ! validate_base_refs "${AUTOMATIC_BASE_REFS}" ||
+             ! validate_base_refs "${MANUAL_BASE_REFS}"; then
+            echo "::error::Список разрешённых base-веток имеет недопустимый формат"
             exit 1
           fi
 
@@ -143,6 +250,7 @@ jobs:
                   exit 1
                   ;;
               esac
+              require_write_permission "${comment_author}"
               ;;
             automatic)
               if [[ "${EVENT_NAME}" != "pull_request_target" ]]; then
@@ -168,13 +276,17 @@ jobs:
               event_head_repository="$(jq -er '.pull_request.head.repo.full_name' "${GITHUB_EVENT_PATH}")"
               event_draft="$(jq -er '.pull_request.draft | tostring' "${GITHUB_EVENT_PATH}")"
               if [[ "${event_pr_number}" != "${PR_NUMBER}" ||
-                    "${event_base_ref}" != "main" ||
                     "${event_head_sha}" != "${EXPECTED_HEAD_SHA}" ||
                     "${event_head_repository}" != "${REPOSITORY}" ||
                     "${event_draft}" != "false" ]]; then
                 echo "::error::Событие не совпадает с безопасным снимком готового PR"
                 exit 1
               fi
+              if ! base_ref_allowed "${AUTOMATIC_BASE_REFS}" "${event_base_ref}"; then
+                echo "::error::Base-ветка ${event_base_ref} не разрешена для автозапуска"
+                exit 1
+              fi
+              require_write_permission "${TRIGGER_ACTOR}"
               ;;
             *)
               echo "::error::Неизвестный источник запуска ревью"
@@ -183,9 +295,13 @@ jobs:
           esac
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ]]; then
+            echo "::error::Ревью запускается только для открытого PR"
+            exit 1
+          fi
+          if [[ "${TRIGGER}" == "automatic" &&
                 "$(jq -r '.draft | tostring' <<< "${pr_json}")" != "false" ]]; then
-            echo "::error::Ревью запускается только для открытого PR в состоянии Ready for review"
+            echo "::error::Автоматическое ревью запускается только в состоянии Ready for review"
             exit 1
           fi
 
@@ -197,9 +313,15 @@ jobs:
             echo "::error::GitHub не вернул точный снимок PR"
             exit 1
           fi
+          allowed_base_refs="${MANUAL_BASE_REFS}"
+          [[ "${TRIGGER}" == "automatic" ]] && allowed_base_refs="${AUTOMATIC_BASE_REFS}"
+          if ! base_ref_allowed "${allowed_base_refs}" "${base_ref}"; then
+            echo "::error::Base-ветка ${base_ref} не разрешена для ${TRIGGER} запуска"
+            exit 1
+          fi
           if [[ "${TRIGGER}" == "automatic" &&
-                ("${base_ref}" != "main" || "${head_repository}" != "${REPOSITORY}") ]]; then
-            echo "::error::Автоматическое ревью разрешено только для main и ветки этого репозитория"
+                "${head_repository}" != "${REPOSITORY}" ]]; then
+            echo "::error::Автоматическое ревью разрешено только для ветки этого репозитория"
             exit 1
           fi
           if [[ "${TRIGGER}" == "automatic" && "${head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
@@ -211,6 +333,7 @@ jobs:
             echo "base_sha=${base_sha}"
             echo "head_sha=${head_sha}"
             echo "trigger=${TRIGGER}"
+            echo "mode=${mode}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "### Зафиксирован снимок PR"
@@ -218,6 +341,7 @@ jobs:
             echo "- Репозиторий: \`${REPOSITORY}\`"
             echo "- PR: \`#${PR_NUMBER}\`"
             echo "- Запуск: \`${TRIGGER}\`"
+            echo "- Режим: \`${mode}\`"
             echo "- Base: \`${base_ref}@${base_sha}\`"
             echo "- Head: \`${head_sha}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -225,26 +349,41 @@ jobs:
   start-status:
     name: Показать запуск двойного ревью
     needs: context
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 3
     permissions:
       issues: write
       pull-requests: write
+      statuses: write
     outputs:
       comment_id: ${{ steps.status.outputs.comment_id }}
     env:
-      GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ inputs.repository }}
       PR_NUMBER: ${{ inputs.pr_number }}
       COMMAND_COMMENT_ID: ${{ inputs.comment_id }}
       TRIGGER: ${{ needs.context.outputs.trigger }}
+      MODE: ${{ needs.context.outputs.mode }}
       HEAD_SHA: ${{ needs.context.outputs.head_sha }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      REVIEW_PUBLISHER_LOGIN: ${{ inputs.review_publisher_login }}
+      REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
+      REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
 
     steps:
+      - name: Получить токен доверенного издателя
+        if: inputs.review_gate_app_client_id != ''
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.review_gate_app_client_id }}
+          private-key: ${{ secrets.REVIEW_GATE_APP_PRIVATE_KEY }}
+
       - name: Поставить 🚀 и опубликовать статус запуска
         id: status
         shell: bash
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
+          REACTION_GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -253,7 +392,7 @@ jobs:
               echo "::error::Не удалось определить комментарий команды"
               exit 1
             fi
-            reactions="$(gh api --paginate --slurp \
+            reactions="$(GH_TOKEN="${REACTION_GH_TOKEN}" gh api --paginate --slurp \
               "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions?per_page=100")"
             existing_rocket="$(jq -r '
               [.[][]? | select(
@@ -261,14 +400,14 @@ jobs:
               )] | first | .id // empty
             ' <<< "${reactions}")"
             if [[ -z "${existing_rocket}" ]]; then
-              gh api --method POST \
+              GH_TOKEN="${REACTION_GH_TOKEN}" gh api --method POST \
                 -H 'Accept: application/vnd.github+json' \
                 "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions" \
                 --raw-field content='rocket' > /dev/null
             fi
             while IFS= read -r reaction_id; do
               [[ -z "${reaction_id}" ]] && continue
-              if ! gh api --method DELETE \
+              if ! GH_TOKEN="${REACTION_GH_TOKEN}" gh api --method DELETE \
                 -H 'Accept: application/vnd.github+json' \
                 "repos/${REPOSITORY}/issues/comments/${COMMAND_COMMENT_ID}/reactions/${reaction_id}" \
                 > /dev/null; then
@@ -281,20 +420,30 @@ jobs:
             ' <<< "${reactions}")
           fi
 
+          if [[ "${MODE}" == "all" ]]; then
+            heading='### 🚀 Двойное ИИ-ревью запущено'
+            reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+          - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
+            footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
+          else
+            heading='### 🚀 Ревью Claude запущено вручную'
+            reviewers="- ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
+            footer='_Этот комментарий обновится после завершения Claude._'
+          fi
+
           marker='<!-- organizational-review-status -->'
           head_short="${HEAD_SHA:0:12}"
           body="$(cat <<EOF
           ${marker}
-          ### 🚀 Двойное ИИ-ревью запущено
+          ${heading}
 
           Проверяется commit \`${head_short}\`.
 
-          - ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
-          - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен
+          ${reviewers}
 
           [Открыть ход выполнения](${RUN_URL})
 
-          _Этот комментарий обновится после завершения обоих ревьюеров._
+          ${footer}
           EOF
           )"
 
@@ -302,8 +451,9 @@ jobs:
             "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
           comment_id="$(jq -r \
             --arg marker "${marker}" \
+            --arg login "${REVIEW_PUBLISHER_LOGIN}" \
             '[.[][]? | select(
-              .user.login == "github-actions[bot]" and
+              .user.login == $login and
               ((.body // "") | contains($marker))
             )] | first | .id // empty' \
             <<< "${comments}")"
@@ -325,10 +475,20 @@ jobs:
           fi
           echo "comment_id=${comment_id}" >> "${GITHUB_OUTPUT}"
 
+          if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
+            gh api --method POST \
+              "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+              --raw-field state='pending' \
+              --raw-field context="${REVIEW_GATE_CONTEXT}" \
+              --raw-field description='Codex и Claude проверяют текущий commit' \
+              --raw-field target_url="${RUN_URL}" > /dev/null
+          fi
+
   prepare-codex:
     name: Подготовить точный diff для Codex Spark
     needs: [context, start-status]
-    runs-on: ubuntu-24.04
+    if: needs.context.outputs.mode == 'all'
+    runs-on: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -341,6 +501,9 @@ jobs:
       PR_NUMBER: ${{ inputs.pr_number }}
       BASE_SHA: ${{ needs.context.outputs.base_sha }}
       HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+      TRIGGER: ${{ needs.context.outputs.trigger }}
+      REVIEW_PUBLISHER_LOGIN: ${{ inputs.review_publisher_login }}
+      REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
 
     steps:
       - name: Получить полную историю точного Base
@@ -369,19 +532,22 @@ jobs:
             exit 1
           fi
 
-          marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
-          reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
-          existing="$(jq -r \
-            --arg marker "${marker}" \
-            '[.[][]? | select(
-              .user.login == "github-actions[bot]" and
-              ((.body // "") | contains($marker))
-            )] | first | .id // empty' \
-            <<< "${reviews}")"
-          if [[ -n "${existing}" ]]; then
-            echo "needed=false" >> "${GITHUB_OUTPUT}"
-            echo "Ревью Codex Spark для этого Base/Head уже существует: ${existing}"
-            exit 0
+          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
+            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
+            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
+            existing="$(jq -r \
+              --arg marker "${marker}" \
+              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
+              '[.[][]? | select(
+                .user.login == $login and
+                ((.body // "") | contains($marker))
+              )] | first | .id // empty' \
+              <<< "${reviews}")"
+            if [[ -n "${existing}" ]]; then
+              echo "needed=false" >> "${GITHUB_OUTPUT}"
+              echo "Ревью Codex Spark для этого Base/Head уже существует: ${existing}"
+              exit 0
+            fi
           fi
           echo "needed=true" >> "${GITHUB_OUTPUT}"
 
@@ -478,8 +644,7 @@ jobs:
     name: Проанализировать PR с GPT-5.3-Codex-Spark
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
-    runs-on:
-      group: codex-spark-review
+    runs-on: ${{ inputs.codex_runner_label }}
     timeout-minutes: 25
     permissions: {}
 
@@ -493,7 +658,7 @@ jobs:
       - name: Проверить Runner, Codex CLI и подписочный вход
         shell: bash
         env:
-          EXPECTED_RUNNER_NAME: codex-spark-review-187-127-26-1
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_codex_runner_name }}
         run: |
           set -euo pipefail
 
@@ -593,13 +758,23 @@ jobs:
     name: Опубликовать проверенное ревью Codex Spark
     needs: [context, prepare-codex, analyze-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 7
     permissions:
       contents: read
       pull-requests: write
+    outputs:
+      blocking_findings: ${{ steps.metrics.outputs.blocking_findings }}
 
     steps:
+      - name: Получить токен доверенного издателя
+        if: inputs.review_gate_app_client_id != ''
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.review_gate_app_client_id }}
+          private-key: ${{ secrets.REVIEW_GATE_APP_PRIVATE_KEY }}
+
       - name: Получить точный diff
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -624,21 +799,33 @@ jobs:
       - name: Опубликовать атомарное ревью Codex Spark
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           REVIEW_MODEL: gpt-5.3-codex-spark
           REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/codex/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/codex/pull-request.diff
+          FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' }}
+          REVIEW_PUBLISHER_LOGIN: ${{ inputs.review_publisher_login }}
         run: |
           set -euo pipefail
           node _review_infra/.github/review/publish-claude-review.mjs
 
+      - name: Зафиксировать число блокирующих замечаний Codex
+        id: metrics
+        shell: bash
+        env:
+          REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/codex/review.json
+        run: |
+          set -euo pipefail
+          count="$(jq -er '[.findings[] | select(.priority == "P0" or .priority == "P1" or .priority == "P2")] | length' "${REVIEW_JSON_FILE}")"
+          echo "blocking_findings=${count}" >> "${GITHUB_OUTPUT}"
+
   analyze-claude:
     name: Проанализировать PR с Claude Sonnet 5
     needs: [context, start-status]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.claude_runner_label }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -652,6 +839,18 @@ jobs:
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
 
     steps:
+      - name: Проверить доверенный Runner Claude
+        if: inputs.expected_claude_runner_name != ''
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_claude_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить точный Base в защищённый корень
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -752,13 +951,21 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          TRIGGER: ${{ needs.context.outputs.trigger }}
+          REVIEW_PUBLISHER_LOGIN: ${{ inputs.review_publisher_login }}
+          REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
         run: |
           set -euo pipefail
 
+          if [[ "${TRIGGER}" == "manual" || "${REUSE_EXISTING_REVIEWS}" != "true" ]]; then
+            echo "needed=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           marker="<!-- claude-review:${BASE_SHA}:${HEAD_SHA}:claude-sonnet-5 -->"
           reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
-          existing="$(jq -r --arg marker "${marker}" \
-            '[.[][]? | select(.user.login == "github-actions[bot]" and (.body // "" | contains($marker)))] | first | .id // empty' \
+          existing="$(jq -r --arg marker "${marker}" --arg login "${REVIEW_PUBLISHER_LOGIN}" \
+            '[.[][]? | select(.user.login == $login and (.body // "" | contains($marker)))] | first | .id // empty' \
             <<< "${reviews}")"
           if [[ -n "${existing}" ]]; then
             echo "needed=false" >> "${GITHUB_OUTPUT}"
@@ -818,7 +1025,7 @@ jobs:
             --permission-mode dontAsk
             --tools "Read"
             --add-dir "${{ github.workspace }}/pr-head"
-            --allowedTools "Read(/pr-head/**),Read(/.review-input/pull-request.diff)"
+            --allowedTools "Read(./pr-head/**),Read(./.review-input/pull-request.diff)"
             --disallowedTools "Agent,Task,TaskOutput,Glob,Grep,Bash,Edit,Write,MultiEdit,NotebookEdit,NotebookEditCell,Replace,WebFetch,WebSearch"
             --json-schema '{"type":"object","properties":{"findings":{"type":"array","maxItems":20,"items":{"type":"object","properties":{"priority":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string","minLength":1,"maxLength":512},"line":{"type":"integer","minimum":1,"maximum":10000000},"side":{"type":"string","enum":["LEFT","RIGHT"]},"title":{"type":"string","minLength":1,"maxLength":160},"body":{"type":"string","minLength":1,"maxLength":2000}},"required":["priority","path","line","side","title","body"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
 
@@ -826,13 +1033,23 @@ jobs:
     name: Опубликовать проверенное ревью Claude
     needs: [context, analyze-claude]
     if: needs.analyze-claude.outputs.review_needed == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 7
     permissions:
       contents: read
       pull-requests: write
+    outputs:
+      blocking_findings: ${{ steps.metrics.outputs.blocking_findings }}
 
     steps:
+      - name: Получить токен доверенного издателя
+        if: inputs.review_gate_app_client_id != ''
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.review_gate_app_client_id }}
+          private-key: ${{ secrets.REVIEW_GATE_APP_PRIVATE_KEY }}
+
       - name: Получить точный Base для публикации
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -892,16 +1109,28 @@ jobs:
       - name: Опубликовать атомарное ревью
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           REVIEW_MODEL: claude-sonnet-5
           REVIEW_JSON: ${{ needs.analyze-claude.outputs.review_json }}
           DIFF_PATH: ${{ github.workspace }}/.review-input/pull-request.diff
+          FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' }}
+          REVIEW_PUBLISHER_LOGIN: ${{ inputs.review_publisher_login }}
         run: |
           set -euo pipefail
           node _review_infra/.github/review/publish-claude-review.mjs
+
+      - name: Зафиксировать число блокирующих замечаний Claude
+        id: metrics
+        shell: bash
+        env:
+          REVIEW_JSON: ${{ needs.analyze-claude.outputs.review_json }}
+        run: |
+          set -euo pipefail
+          count="$(jq -er '[.findings[] | select(.priority == "P0" or .priority == "P1" or .priority == "P2")] | length' <<< "${REVIEW_JSON}")"
+          echo "blocking_findings=${count}" >> "${GITHUB_OUTPUT}"
 
   finish-status:
     name: Обновить итог двойного ревью
@@ -917,29 +1146,43 @@ jobs:
       always() &&
       needs.context.result == 'success' &&
       needs.start-status.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 3
     permissions:
       issues: write
       pull-requests: write
+      statuses: write
     env:
-      GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ inputs.repository }}
       PR_NUMBER: ${{ inputs.pr_number }}
       STATUS_COMMENT_ID: ${{ needs.start-status.outputs.comment_id }}
       HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+      MODE: ${{ needs.context.outputs.mode }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       CODEX_PREPARE_RESULT: ${{ needs.prepare-codex.result }}
       CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
+      CODEX_BLOCKING_FINDINGS: ${{ needs.publish-codex.outputs.blocking_findings }}
       CLAUDE_ANALYZE_RESULT: ${{ needs.analyze-claude.result }}
       CLAUDE_REVIEW_NEEDED: ${{ needs.analyze-claude.outputs.review_needed }}
       CLAUDE_PUBLISH_RESULT: ${{ needs.publish-claude.result }}
+      CLAUDE_BLOCKING_FINDINGS: ${{ needs.publish-claude.outputs.blocking_findings }}
+      REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
 
     steps:
+      - name: Получить токен доверенного издателя
+        if: inputs.review_gate_app_client_id != ''
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.review_gate_app_client_id }}
+          private-key: ${{ secrets.REVIEW_GATE_APP_PRIVATE_KEY }}
+
       - name: Показать результат обоих ревьюеров
         shell: bash
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
         run: |
           set -euo pipefail
 
@@ -957,7 +1200,10 @@ jobs:
           fi
 
           codex_ok=false
-          if [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
+          if [[ "${MODE}" == "claude" ]]; then
+            codex_ok=true
+            codex_line=""
+          elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
             codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
@@ -983,10 +1229,25 @@ jobs:
             claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — публикация завершилась ошибкой"
           fi
 
-          if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" ]]; then
-            heading='### ✅ Двойное ИИ-ревью завершено'
+          blocking_findings=0
+          if [[ "${MODE}" == "all" && "${CODEX_REVIEW_NEEDED}" == "true" ]]; then
+            [[ "${CODEX_BLOCKING_FINDINGS}" =~ ^[0-9]+$ ]] || codex_ok=false
+            [[ "${CODEX_BLOCKING_FINDINGS}" =~ ^[0-9]+$ ]] &&
+              blocking_findings=$((blocking_findings + CODEX_BLOCKING_FINDINGS))
+          fi
+          if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
+            [[ "${CLAUDE_BLOCKING_FINDINGS}" =~ ^[0-9]+$ ]] || claude_ok=false
+            [[ "${CLAUDE_BLOCKING_FINDINGS}" =~ ^[0-9]+$ ]] &&
+              blocking_findings=$((blocking_findings + CLAUDE_BLOCKING_FINDINGS))
+          fi
+
+          if [[ "${MODE}" == "all" && "${codex_ok}" == "true" &&
+                "${claude_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
+            heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+          elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" ]]; then
+            heading='### ✅ Ручное ревью Claude завершено'
           else
-            heading='### ❌ Двойное ИИ-ревью требует внимания'
+            heading='### ❌ ИИ-ревью требует внимания'
           fi
 
           marker='<!-- organizational-review-status -->'
@@ -1000,6 +1261,8 @@ jobs:
           ${codex_line}
           ${claude_line}
 
+          Блокирующих замечаний P0–P2: **${blocking_findings}**.
+
           [Открыть журнал выполнения](${RUN_URL})
           EOF
           )"
@@ -1007,3 +1270,20 @@ jobs:
           gh api --method PATCH \
             "repos/${REPOSITORY}/issues/comments/${STATUS_COMMENT_ID}" \
             --raw-field body="${body}" > /dev/null
+
+          if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
+            if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" &&
+                  "${blocking_findings}" == "0" ]]; then
+              gate_state='success'
+              gate_description='Codex и Claude завершили ревью без P0–P2'
+            else
+              gate_state='failure'
+              gate_description='Ревью не завершено либо найдены P0–P2'
+            fi
+            gh api --method POST \
+              "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+              --raw-field state="${gate_state}" \
+              --raw-field context="${REVIEW_GATE_CONTEXT}" \
+              --raw-field description="${gate_description}" \
+              --raw-field target_url="${RUN_URL}" > /dev/null
+          fi

@@ -377,7 +377,13 @@ async function githubRequest(path, { method = "GET", body, token } = {}) {
   return responseText ? JSON.parse(responseText) : null;
 }
 
-async function findExistingReview({ repository, pullNumber, marker, token }) {
+async function findExistingReview({
+  repository,
+  pullNumber,
+  marker,
+  token,
+  publisherLogin = "github-actions[bot]",
+}) {
   for (let page = 1; page <= 20; page += 1) {
     const reviews = await githubRequest(
       `/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100&page=${page}`,
@@ -385,7 +391,7 @@ async function findExistingReview({ repository, pullNumber, marker, token }) {
     );
 
     const existing = reviews.find(
-      (review) => review.user?.login === "github-actions[bot]" && review.body?.includes(marker),
+      (review) => review.user?.login === publisherLogin && review.body?.includes(marker),
     );
     if (existing) {
       return existing;
@@ -415,16 +421,34 @@ function pullRequestMatches(pullRequest, baseSha, headSha) {
   return pullRequest?.base?.sha === baseSha && pullRequest?.head?.sha === headSha;
 }
 
-export async function reviewNeeded({ repository, pullNumber, baseSha, headSha, reviewModel, token }) {
+export async function reviewNeeded({
+  repository,
+  pullNumber,
+  baseSha,
+  headSha,
+  reviewModel,
+  token,
+  publisherLogin = "github-actions[bot]",
+  forceReview = false,
+}) {
   validateRequestContext({ repository, pullNumber, baseSha, headSha, reviewModel });
 
   const pullRequest = await currentPullRequest({ repository, pullNumber, token });
   if (!pullRequestMatches(pullRequest, baseSha, headSha)) {
     return false;
   }
+  if (forceReview) {
+    return true;
+  }
 
   const marker = reviewMarker(baseSha, headSha, reviewModel);
-  return (await findExistingReview({ repository, pullNumber, marker, token })) === null;
+  return (await findExistingReview({
+    repository,
+    pullNumber,
+    marker,
+    token,
+    publisherLogin,
+  })) === null;
 }
 
 async function checkReviewNeededFromEnvironment() {
@@ -441,6 +465,8 @@ async function checkReviewNeededFromEnvironment() {
     headSha: requireEnvironment("HEAD_SHA"),
     reviewModel: requireEnvironment("REVIEW_MODEL"),
     token: requireEnvironment("GH_TOKEN"),
+    publisherLogin: process.env.REVIEW_PUBLISHER_LOGIN ?? "github-actions[bot]",
+    forceReview: process.env.FORCE_REVIEW === "true",
   });
 }
 
@@ -452,6 +478,8 @@ export async function main() {
   const headSha = requireEnvironment("HEAD_SHA");
   const token = requireEnvironment("GH_TOKEN");
   const reviewModel = requireEnvironment("REVIEW_MODEL");
+  const publisherLogin = process.env.REVIEW_PUBLISHER_LOGIN ?? "github-actions[bot]";
+  const forceReview = process.env.FORCE_REVIEW === "true";
   const rawReview = process.env.REVIEW_JSON_FILE
     ? readFileSync(process.env.REVIEW_JSON_FILE, "utf8")
     : requireEnvironment("REVIEW_JSON");
@@ -469,8 +497,14 @@ export async function main() {
     return;
   }
 
-  const existingReview = await findExistingReview({ repository, pullNumber, marker, token });
-  if (existingReview) {
+  const existingReview = await findExistingReview({
+    repository,
+    pullNumber,
+    marker,
+    token,
+    publisherLogin,
+  });
+  if (existingReview && !forceReview) {
     console.log(`Ревью этого diff уже опубликовано: ${existingReview.html_url}`);
     return;
   }

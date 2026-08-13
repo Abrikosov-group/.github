@@ -344,6 +344,28 @@ test("до запуска Claude пропускает дубликат и уст
   }, () => reviewNeeded(context));
   assert.equal(staleNeeded, false);
   assert.equal(staleCalls.length, 1);
+
+  const appDuplicateCalls = [];
+  const appDuplicateNeeded = await withFetch(async (url) => {
+    appDuplicateCalls.push(String(url));
+    if (appDuplicateCalls.length === 1) {
+      return jsonResponse(currentPullRequest);
+    }
+    return jsonResponse([{
+      user: { login: "abrikosov-review-gate-publisher[bot]" },
+      body: marker,
+    }]);
+  }, () => reviewNeeded({
+    ...context,
+    publisherLogin: "abrikosov-review-gate-publisher[bot]",
+  }));
+  assert.equal(appDuplicateNeeded, false);
+
+  const forcedNeeded = await withFetch(
+    async () => jsonResponse(currentPullRequest),
+    () => reviewNeeded({ ...context, forceReview: true }),
+  );
+  assert.equal(forcedNeeded, true);
 });
 
 test("публикует итог и comments одним API-запросом после тройной проверки SHA", async () => {
@@ -428,6 +450,35 @@ test("не публикует повторное ревью того же diff",
 
   assert.equal(calls.length, 2);
   assert.equal(calls.some((call) => call.options.method === "POST"), false);
+});
+
+test("ручной запуск публикует новое ревью даже для уже проверенного SHA", async () => {
+  const calls = [];
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
+  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+
+  await runMainWithFetch(async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (calls.length === 1 || calls.length === 3 || calls.length === 5) {
+      return jsonResponse(currentPullRequest);
+    }
+    if (calls.length === 2) {
+      return jsonResponse([{
+        user: { login: "abrikosov-review-gate-publisher[bot]" },
+        body: marker,
+      }]);
+    }
+    return jsonResponse({
+      id: 99,
+      html_url: "https://github.com/example/sawabook/pull/55#forced-review",
+    });
+  }, {
+    FORCE_REVIEW: "true",
+    REVIEW_PUBLISHER_LOGIN: "abrikosov-review-gate-publisher[bot]",
+  });
+
+  assert.equal(calls.length, 5);
+  assert.equal(calls[3].options.method, "POST");
 });
 
 test("публикует Opus после Sonnet для того же diff", async () => {
