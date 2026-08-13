@@ -952,6 +952,39 @@ test("повторно использованное ревью с P0–P2 не �
   assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
 });
 
+test("ручное ревью Claude с P0–P2 не показывает зелёный итог", () => {
+  const headSha = "b".repeat(40);
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      HEAD_SHA: headSha,
+      MODE: "claude",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      CODEX_PREPARE_RESULT: "skipped",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "true",
+      CLAUDE_PUBLISH_RESULT: "success",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "1",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "",
+      REVIEW_GATE_CONTEXT: "",
+    },
+  });
+
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.ghLog, /ИИ-ревью требует внимания/u);
+  assert.match(finish.ghLog, /Блокирующих замечаний P0–P2: \*\*1\*\*/u);
+  assert.doesNotMatch(finish.ghLog, /✅ Ручное ревью Claude завершено/u);
+});
+
 test("старое ревью без доверенных метрик запускает модель повторно", () => {
   const baseSha = "a".repeat(40);
   const headSha = "b".repeat(40);

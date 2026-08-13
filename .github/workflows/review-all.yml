@@ -1282,8 +1282,9 @@ jobs:
           if [[ "${MODE}" == "all" && "${codex_ok}" == "true" &&
                 "${claude_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
             heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
-          elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" ]]; then
-            heading='### ✅ Ручное ревью Claude завершено'
+          elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" &&
+                  "${blocking_findings}" == "0" ]]; then
+            heading='### ✅ Ручное ревью Claude завершено без блокеров'
           else
             heading='### ❌ ИИ-ревью требует внимания'
           fi
