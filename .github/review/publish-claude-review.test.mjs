@@ -660,40 +660,51 @@ test("публикует Opus после Sonnet для того же diff", asyn
   assert.match(payload.body, /Claude Opus 5/u);
 });
 
-test("[6] помечает опубликованное ревью устаревшим при гонке Head SHA", async () => {
+test("[6] помечает опубликованное ревью устаревшим при гонке Base SHA и падает закрыто", async () => {
   const calls = [];
   const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
-  const changedPullRequest = { base: { sha: BASE_SHA }, head: { sha: "3".repeat(40) } };
+  const changedPullRequest = { base: { sha: "3".repeat(40) }, head: { sha: HEAD_SHA } };
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "review-stale-output-"));
+  const outputPath = join(temporaryDirectory, "github-output.txt");
+  writeFileSync(outputPath, "", "utf8");
 
-  await runMainWithFetch(async (url, options) => {
-    calls.push({ url: String(url), options });
-    if (calls.length === 1 || calls.length === 3) {
-      return jsonResponse(currentPullRequest);
-    }
-    if (calls.length === 2) {
-      return jsonResponse([]);
-    }
-    if (calls.length === 4) {
-      return jsonResponse({
-        id: 44,
-        html_url: "https://github.com/example/sawabook/pull/55#stale-review",
-      });
-    }
-    if (calls.length === 5) {
-      return jsonResponse(changedPullRequest);
-    }
-    return jsonResponse({ id: 44, body: JSON.parse(options.body).body });
-  });
+  try {
+    await assert.rejects(
+      runMainWithFetch(async (url, options) => {
+        calls.push({ url: String(url), options });
+        if (calls.length === 1 || calls.length === 3) {
+          return jsonResponse(currentPullRequest);
+        }
+        if (calls.length === 2) {
+          return jsonResponse([]);
+        }
+        if (calls.length === 4) {
+          return jsonResponse({
+            id: 44,
+            html_url: "https://github.com/example/sawabook/pull/55#stale-review",
+          });
+        }
+        if (calls.length === 5) {
+          return jsonResponse(changedPullRequest);
+        }
+        return jsonResponse({ id: 44, body: JSON.parse(options.body).body });
+      }, { GITHUB_OUTPUT: outputPath }),
+      /устаревшее ревью не считается успешно опубликованным/u,
+    );
 
-  assert.equal(calls.length, 6);
-  assert.equal(calls[5].options.method, "PUT");
-  assert.match(calls[5].url, /\/pulls\/55\/reviews\/44$/u);
-  const stalePayload = JSON.parse(calls[5].options.body);
-  assert.equal(
-    stalePayload.body,
-    buildStaleReviewBody(BASE_SHA, HEAD_SHA, STANDARD_MODEL),
-  );
-  assert.match(stalePayload.body, /Ревью Claude устарело/u);
+    assert.equal(calls.length, 6);
+    assert.equal(calls[5].options.method, "PUT");
+    assert.match(calls[5].url, /\/pulls\/55\/reviews\/44$/u);
+    const stalePayload = JSON.parse(calls[5].options.body);
+    assert.equal(
+      stalePayload.body,
+      buildStaleReviewBody(BASE_SHA, HEAD_SHA, STANDARD_MODEL),
+    );
+    assert.match(stalePayload.body, /Ревью Claude устарело/u);
+    assert.equal(readFileSync(outputPath, "utf8"), "");
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("[5] не публикует результат для устаревшего Head SHA", async () => {

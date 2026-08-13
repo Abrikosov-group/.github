@@ -449,6 +449,7 @@ test("Claude не получает инструменты записи, shell и
   assert.match(workflow, /--tools "Read"/u);
   assert.match(workflow, /--disallowedTools "[^"]*Bash[^"]*WebFetch[^"]*WebSearch"/u);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/u);
+  assert.match(workflow, /Не включай HTML-теги, HTML-комментарии или служебные маркеры/u);
 });
 
 test("Claude запускается из точного доверенного Base checkout", () => {

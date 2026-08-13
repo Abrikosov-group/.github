@@ -618,8 +618,10 @@ export async function main() {
       body: { body: buildStaleReviewBody(baseSha, headSha, reviewModel) },
       token,
     });
-    console.log(`Ревью ${result.html_url} помечено устаревшим после изменения Head SHA.`);
-    return;
+    console.log(`Ревью ${result.html_url} помечено устаревшим после изменения Base или Head SHA.`);
+    throw new Error(
+      "Base или Head PR изменился после публикации; устаревшее ревью не считается успешно опубликованным.",
+    );
   }
 
   writeWorkflowOutput("blocking_findings", review.findings.length);
