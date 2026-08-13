@@ -7,9 +7,10 @@
 Центральный reusable workflow `.github/workflows/review-all.yml` выполняет
 двойное ревью pull request:
 
-- GPT-5.3-Codex-Spark с усилием `xhigh` через Codex CLI на защищённом
+- GPT-5.3-Codex-Spark с усилием `xhigh` через Codex CLI на отдельном защищённом
   self-hosted runner и оплаченный вход ChatGPT;
-- Claude Sonnet 5 с усилием `xhigh` через подписочный OAuth Claude Code.
+- Claude Sonnet 5 с усилием `xhigh` через подписочный OAuth Claude Code на
+  отдельном защищённом self-hosted runner.
 
 Gemini и платные API-ключи моделей не используются.
 
@@ -19,8 +20,10 @@ Codex запускается командой `codex exec --model gpt-5.3-codex-
 Точный diff передаётся модели без checkout недоверенного PR на сервере, а
 результат проходит строгую проверку перед публикацией.
 
-Runner group `codex-spark-review` должен быть доступен всем подключённым
-репозиториям организации и ограничен этим reusable workflow. На runner должен
+Подключатель обязан передать одну ограниченную runner group и три разных label:
+для служебной оркестрации, Codex и Claude. Все jobs выбирают runner одновременно
+по group и label и проверяют его точное имя до содержательной работы. Модельные
+runner изолированы друг от друга и от служебного runner. На Codex runner должен
 быть выполнен подписочный вход `codex login`; его `CODEX_HOME` сохраняется между
 запусками. Diff для одного запуска Codex ограничен 512 KiB.
 
@@ -69,7 +72,12 @@ reusable workflow.
 /review-all
 ```
 
-`/review-all` повторно запускает Codex и Claude. Отдельной команды для Claude нет.
+`/review-all` повторно запускает Codex и Claude. Для повторного запуска только
+Claude используйте отдельный комментарий:
+
+```text
+/review-claude
+```
 После принятия ручной команды бот ставит на неё 👀. Эта реакция остаётся, пока
 запуск ожидает общей очереди. Когда центральный workflow действительно начинает
 ревью, 👀 заменяется на 🚀 и появляется статусный комментарий. Если запуск не

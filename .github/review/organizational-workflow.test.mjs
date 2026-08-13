@@ -314,7 +314,8 @@ test("организационный workflow запускает только Co
 });
 
 test("Codex использует подписочный Spark xhigh на настраиваемом защищённом Runner", () => {
-  assert.match(workflow, /runs-on: \$\{\{ inputs\.codex_runner_label \}\}/u);
+  const codexJob = extractJob(workflow, "analyze-codex");
+  assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);
   assert.match(workflow, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_codex_runner_name \}\}/u);
   assert.match(workflow, /codex login status/u);
   assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
@@ -327,6 +328,56 @@ test("Codex использует подписочный Spark xhigh на нас�
     /REVIEW_DISPATCH_TOKEN:\n\s+description: Устаревший совместимый секрет; новое ревью его не использует\n\s+required: false/u,
   );
   assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
+});
+
+test("все jobs закреплены одновременно за runner group, label и точным именем", () => {
+  const serviceJobs = [
+    "context",
+    "start-status",
+    "prepare-codex",
+    "publish-codex",
+    "publish-claude",
+    "finish-status",
+  ];
+  const modelJobs = [
+    ["analyze-codex", "codex_runner_label", "expected_codex_runner_name", "Codex"],
+    ["analyze-claude", "claude_runner_label", "expected_claude_runner_name", "Claude"],
+  ];
+
+  for (const input of [
+    "review_runner_group",
+    "orchestration_runner_label",
+    "codex_runner_label",
+    "claude_runner_label",
+    "expected_orchestration_runner_name",
+    "expected_codex_runner_name",
+    "expected_claude_runner_name",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`${input}:\\n\\s+description: [^\\n]+\\n\\s+required: true\\n\\s+type: string`, "u"),
+    );
+  }
+
+  for (const jobId of serviceJobs) {
+    const job = extractJob(workflow, jobId);
+    assert.match(job, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.orchestration_runner_label \}\}/u);
+    assert.match(job, /steps:\n\s+- name: Проверить доверенный Runner оркестрации/u);
+    assert.match(job, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_orchestration_runner_name \}\}/u);
+  }
+
+  for (const [jobId, labelInput, nameInput, displayName] of modelJobs) {
+    const job = extractJob(workflow, jobId);
+    assert.match(
+      job,
+      new RegExp(`runs-on:\\n\\s+group: \\$\\{\\{ inputs\\.review_runner_group \\}\\}\\n\\s+labels: \\$\\{\\{ inputs\\.${labelInput} \\}\\}`, "u"),
+    );
+    assert.match(job, new RegExp(`steps:\\n\\s+- name: Проверить доверенный Runner ${displayName}`, "u"));
+    assert.match(job, new RegExp(`EXPECTED_RUNNER_NAME: \\$\\{\\{ inputs\\.${nameInput} \\}\\}`, "u"));
+  }
+
+  assert.doesNotMatch(workflow, /runs-on: \$\{\{ inputs\.[a-z_]+_runner_label \}\}/u);
+  assert.doesNotMatch(workflow, /runs-on: (?:ubuntu|windows|macos)-/u);
 });
 
 test("точный diff строится от доказанного merge base", () => {
@@ -622,6 +673,7 @@ test("[7–10] центральная очередь едина для manual и
       "concurrency:",
       "  group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}",
       "  cancel-in-progress: false",
+      "  queue: max",
     ].join("\n"),
   );
   assert.doesNotMatch(concurrency, /inputs\.trigger/u);
@@ -642,12 +694,23 @@ test("GitHub App сам определяет login доверенного изд
     env: {
       APP_CLIENT_ID: "Iv23example",
       APP_SLUG: "abrikosov-review-gate-publisher",
-      FALLBACK_LOGIN: "github-actions[bot]",
     },
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.outputs, /^login=abrikosov-review-gate-publisher\[bot\]$/mu);
   assert.match(workflow, /client-id: \$\{\{ inputs\.review_gate_app_client_id \}\}/u);
+
+  const fallback = executeRunScript({
+    stepName: "Определить доверенного издателя",
+    ghMock: contextGhMock,
+    env: {
+      APP_CLIENT_ID: "",
+      APP_SLUG: "",
+    },
+  });
+  assert.equal(fallback.status, 0, fallback.stderr);
+  assert.match(fallback.outputs, /^login=github-actions\[bot\]$/mu);
+  assert.doesNotMatch(workflow, /review_publisher_login|FALLBACK_LOGIN/u);
 });
 
 test("разрешённые base-ветки параметризованы, а same-repo обязателен для автозапуска", () => {
@@ -1014,6 +1077,57 @@ test("старое ревью без доверенных метрик запу�
   assert.equal(codex.status, 0, codex.stderr);
   assert.match(codex.outputs, /^needed=true$/mu);
   assert.match(codex.stdout, /не содержит доверенных метрик/u);
+});
+
+test("повторяющиеся и небезопасные метрики не считаются доверенными", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const cases = [
+    {
+      stepName: "Проверить дубликат и подготовить вход модели",
+      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+      commandMocks: { git: gitHeadMock },
+    },
+    {
+      stepName: "Не расходовать квоту повторно для того же снимка",
+      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->`,
+      commandMocks: {},
+    },
+  ];
+  const metricBodies = [
+    "<!-- review-findings:P0=0;P1=0;P2=0 -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->",
+    "<!-- review-findings:P0=9007199254740992;P1=0;P2=0 -->",
+  ];
+
+  for (const { stepName, marker, commandMocks } of cases) {
+    for (const metrics of metricBodies) {
+      const result = executeRunScript({
+        stepName,
+        ghMock: markerGhMock,
+        commandMocks,
+        env: {
+          REPOSITORY: "Abrikosov-group/project",
+          PR_NUMBER: "17",
+          BASE_SHA: baseSha,
+          HEAD_SHA: headSha,
+          TRIGGER: "automatic",
+          REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+          REUSE_EXISTING_REVIEWS: "true",
+          MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+          MOCK_REVIEWS_JSON: JSON.stringify([[
+            {
+              id: 302,
+              user: { login: "github-actions[bot]" },
+              body: `${marker}\n${metrics}`,
+            },
+          ]]),
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.outputs, /^needed=true$/mu);
+      assert.doesNotMatch(result.outputs, /^blocking_findings=/mu);
+    }
+  }
 });
 
 test("из нескольких ручных ревью одного SHA gate берёт самое новое", () => {

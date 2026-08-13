@@ -45,35 +45,33 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: "*"
         type: string
+      review_runner_group:
+        description: Runner group для всех jobs двойного ревью
+        required: true
+        type: string
       orchestration_runner_label:
         description: Runner label для подготовки, публикации и статусов
-        required: false
-        default: ubuntu-24.04
+        required: true
         type: string
       codex_runner_label:
         description: Runner label для анализа Codex
-        required: false
-        default: codex-spark-review
+        required: true
         type: string
       claude_runner_label:
         description: Runner label для анализа Claude
-        required: false
-        default: ubuntu-24.04
+        required: true
+        type: string
+      expected_orchestration_runner_name:
+        description: Точное имя доверенного runner оркестрации
+        required: true
         type: string
       expected_codex_runner_name:
         description: Точное имя доверенного runner Codex
-        required: false
-        default: codex-spark-review-187-127-26-1
+        required: true
         type: string
       expected_claude_runner_name:
-        description: Точное имя доверенного runner Claude; пустое отключает проверку имени
-        required: false
-        default: ""
-        type: string
-      review_publisher_login:
-        description: GitHub login доверенного издателя ревью
-        required: false
-        default: "github-actions[bot]"
+        description: Точное имя доверенного runner Claude
+        required: true
         type: string
       reuse_existing_reviews:
         description: Не запускать модель повторно, если для SHA уже есть ревью
@@ -106,11 +104,14 @@ permissions: {}
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   context:
     name: Проверить запуск и зафиксировать PR
-    runs-on: ${{ inputs.orchestration_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 3
     permissions:
       contents: read
@@ -139,6 +140,17 @@ jobs:
       MANUAL_BASE_REFS: ${{ inputs.manual_base_refs }}
 
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Проверить источник запуска
         id: pr
         shell: bash
@@ -349,7 +361,9 @@ jobs:
   start-status:
     name: Показать запуск двойного ревью
     needs: context
-    runs-on: ${{ inputs.orchestration_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 3
     permissions:
       issues: write
@@ -370,6 +384,17 @@ jobs:
       REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
 
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить токен доверенного издателя
         if: inputs.review_gate_app_client_id != ''
         id: publisher-token
@@ -384,7 +409,6 @@ jobs:
         env:
           APP_CLIENT_ID: ${{ inputs.review_gate_app_client_id }}
           APP_SLUG: ${{ steps.publisher-token.outputs.app-slug }}
-          FALLBACK_LOGIN: ${{ inputs.review_publisher_login }}
         run: |
           set -euo pipefail
 
@@ -395,7 +419,7 @@ jobs:
             fi
             publisher_login="${APP_SLUG}[bot]"
           else
-            publisher_login="${FALLBACK_LOGIN}"
+            publisher_login="github-actions[bot]"
           fi
           if [[ ! "${publisher_login}" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
             echo "::error::Login доверенного издателя имеет недопустимый формат"
@@ -514,7 +538,9 @@ jobs:
     name: Подготовить точный diff для Codex Spark
     needs: [context, start-status]
     if: needs.context.outputs.mode == 'all'
-    runs-on: ${{ inputs.orchestration_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -533,6 +559,17 @@ jobs:
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
 
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить полную историю точного Base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -572,9 +609,17 @@ jobs:
               <<< "${reviews}")"
             if [[ "${existing}" != "null" ]]; then
               if blocking_findings="$(jq -er '
-                (.body // "") |
-                capture("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->") |
-                ((.p0 | tonumber) + (.p1 | tonumber) + (.p2 | tonumber))
+                [
+                  (.body // "") |
+                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
+                ] as $matches |
+                select(($matches | length) == 1) |
+                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
+                [$counts.p0, $counts.p1, $counts.p2] |
+                map(tonumber) |
+                select(all(.[]; . <= 9007199254740991)) |
+                add |
+                select(. <= 9007199254740991)
               ' <<< "${existing}")"; then
                 echo "needed=false" >> "${GITHUB_OUTPUT}"
                 echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
@@ -679,28 +724,34 @@ jobs:
     name: Проанализировать PR с GPT-5.3-Codex-Spark
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
-    runs-on: ${{ inputs.codex_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.codex_runner_label }}
     timeout-minutes: 25
     permissions: {}
 
     steps:
+      - name: Проверить доверенный Runner Codex
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_codex_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить только подготовленный вход ревью
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: codex-review-input
           path: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}/input
 
-      - name: Проверить Runner, Codex CLI и подписочный вход
+      - name: Проверить Codex CLI и подписочный вход
         shell: bash
-        env:
-          EXPECTED_RUNNER_NAME: ${{ inputs.expected_codex_runner_name }}
         run: |
           set -euo pipefail
-
-          test "${RUNNER_ENVIRONMENT}" = self-hosted
-          test "${RUNNER_OS}" = Linux
-          test "${RUNNER_ARCH}" = X64
-          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
           command -v codex > /dev/null
           codex --version
           codex login status
@@ -793,7 +844,9 @@ jobs:
     name: Опубликовать проверенное ревью Codex Spark
     needs: [context, start-status, prepare-codex, analyze-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
-    runs-on: ${{ inputs.orchestration_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 7
     permissions:
       contents: read
@@ -802,6 +855,17 @@ jobs:
       blocking_findings: ${{ steps.publish.outputs.blocking_findings }}
 
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить токен доверенного издателя
         if: inputs.review_gate_app_client_id != ''
         id: publisher-token
@@ -852,7 +916,9 @@ jobs:
   analyze-claude:
     name: Проанализировать PR с Claude Sonnet 5
     needs: [context, start-status]
-    runs-on: ${{ inputs.claude_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.claude_runner_label }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -868,7 +934,6 @@ jobs:
 
     steps:
       - name: Проверить доверенный Runner Claude
-        if: inputs.expected_claude_runner_name != ''
         shell: bash
         env:
           EXPECTED_RUNNER_NAME: ${{ inputs.expected_claude_runner_name }}
@@ -997,9 +1062,17 @@ jobs:
             <<< "${reviews}")"
           if [[ "${existing}" != "null" ]]; then
             if blocking_findings="$(jq -er '
-              (.body // "") |
-              capture("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->") |
-              ((.p0 | tonumber) + (.p1 | tonumber) + (.p2 | tonumber))
+              [
+                (.body // "") |
+                match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
+              ] as $matches |
+              select(($matches | length) == 1) |
+              ($matches[0].captures | map({(.name): .string}) | add) as $counts |
+              [$counts.p0, $counts.p1, $counts.p2] |
+              map(tonumber) |
+              select(all(.[]; . <= 9007199254740991)) |
+              add |
+              select(. <= 9007199254740991)
             ' <<< "${existing}")"; then
               echo "needed=false" >> "${GITHUB_OUTPUT}"
               echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
@@ -1069,7 +1142,9 @@ jobs:
     name: Опубликовать проверенное ревью Claude
     needs: [context, start-status, analyze-claude]
     if: needs.analyze-claude.outputs.review_needed == 'true'
-    runs-on: ${{ inputs.orchestration_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 7
     permissions:
       contents: read
@@ -1078,6 +1153,17 @@ jobs:
       blocking_findings: ${{ steps.publish.outputs.blocking_findings }}
 
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить токен доверенного издателя
         if: inputs.review_gate_app_client_id != ''
         id: publisher-token
@@ -1174,7 +1260,9 @@ jobs:
       always() &&
       needs.context.result == 'success' &&
       needs.start-status.result == 'success'
-    runs-on: ${{ inputs.orchestration_runner_label }}
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 3
     permissions:
       issues: write
@@ -1201,6 +1289,17 @@ jobs:
       REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
 
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить токен доверенного издателя
         if: inputs.review_gate_app_client_id != ''
         id: publisher-token

@@ -9,6 +9,7 @@ const MAX_DIFF_BYTES = 50 * 1024 * 1024;
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const REVIEW_FINDINGS_PATTERN = /<!-- review-findings:P0=([0-9]+);P1=([0-9]+);P2=([0-9]+) -->/gu;
 const REVIEW_MODELS = new Map([
   ["claude-sonnet-5", {
     displayName: "Claude Sonnet 5",
@@ -443,6 +444,25 @@ async function findExistingReview({
   throw new Error("Не удалось проверить идемпотентность: в PR больше 2000 ревью.");
 }
 
+export function trustedReviewBlockingFindings(review) {
+  if (typeof review?.body !== "string") {
+    return null;
+  }
+
+  const matches = [...review.body.matchAll(REVIEW_FINDINGS_PATTERN)];
+  if (matches.length !== 1) {
+    return null;
+  }
+
+  const counts = matches[0].slice(1).map((value) => Number.parseInt(value, 10));
+  if (counts.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    return null;
+  }
+
+  const total = counts.reduce((sum, value) => sum + value, 0);
+  return Number.isSafeInteger(total) ? total : null;
+}
+
 function writeWorkflowOutput(name, value) {
   const outputPath = process.env.GITHUB_OUTPUT;
   if (outputPath) {
@@ -488,13 +508,14 @@ export async function reviewNeeded({
   }
 
   const marker = reviewMarker(baseSha, headSha, reviewModel);
-  return (await findExistingReview({
+  const existingReview = await findExistingReview({
     repository,
     pullNumber,
     marker,
     token,
     publisherLogin,
-  })) === null;
+  });
+  return trustedReviewBlockingFindings(existingReview) === null;
 }
 
 async function checkReviewNeededFromEnvironment() {
@@ -550,9 +571,14 @@ export async function main() {
     token,
     publisherLogin,
   });
-  if (existingReview && !forceReview) {
+  const existingBlockingFindings = trustedReviewBlockingFindings(existingReview);
+  if (existingBlockingFindings !== null && !forceReview) {
+    writeWorkflowOutput("blocking_findings", existingBlockingFindings);
     console.log(`Ревью этого diff уже опубликовано: ${existingReview.html_url}`);
     return;
+  }
+  if (existingReview && !forceReview) {
+    console.log("Существующее ревью не содержит ровно один корректный маркер метрик; будет опубликовано новое ревью.");
   }
 
   const { anchored, unanchored } = review.findings.length > 0
