@@ -60,10 +60,18 @@ jobs:
           comment_body="$(jq -er '.body' <<< "${comment_json}")"
           comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
           comment_author_association="$(jq -er '.author_association' <<< "${comment_json}")"
-          if [[ "${comment_issue_number}" != "${PR_NUMBER}" ||
-                "${comment_body}" != "/review-all" ||
-                "${comment_author}" != "${TRIGGER_ACTOR}" ]]; then
-            echo "::error::Комментарий не совпадает с событием ручной команды"
+          comment_author_normalized="$(tr '[:upper:]' '[:lower:]' <<< "${comment_author}")"
+          trigger_actor_normalized="$(tr '[:upper:]' '[:lower:]' <<< "${TRIGGER_ACTOR}")"
+          if [[ "${comment_issue_number}" != "${PR_NUMBER}" ]]; then
+            echo "::error::Комментарий относится к другому PR"
+            exit 1
+          fi
+          if [[ "${comment_body}" != "/review-all" ]]; then
+            echo "::error::Текст комментария не совпадает с ручной командой"
+            exit 1
+          fi
+          if [[ "${comment_author_normalized}" != "${trigger_actor_normalized}" ]]; then
+            echo "::error::Автор комментария не совпадает с инициатором workflow"
             exit 1
           fi
           case "${comment_author_association}" in
