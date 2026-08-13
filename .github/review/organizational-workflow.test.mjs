@@ -401,12 +401,20 @@ test("Claude запускается из точного доверенного B
   );
 });
 
-test("ручной источник проверяется без хрупкого сравнения полного API URL", () => {
+test("ручной источник проверяется без хрупких сравнений URL, регистра и снимков роли", () => {
   assert.match(workflow, /TRIGGER_ACTOR: \$\{\{ github\.actor \}\}/u);
   assert.match(workflow, /capture\("\/issues\/\(\?<number>\[1-9\]\[0-9\]\*\)\$"\)/u);
-  assert.match(workflow, /"\$\{comment_author\}" != "\$\{TRIGGER_ACTOR\}"/u);
+  assert.match(
+    workflow,
+    /"\$\{comment_author_normalized\}" != "\$\{trigger_actor_normalized\}"/u,
+  );
+  assert.match(workflow, /tr '\[:upper:\]' '\[:lower:\]'/u);
   assert.match(workflow, /case "\$\{comment_author_association\}" in/u);
   assert.doesNotMatch(workflow, /expected_issue_url/u);
+  assert.doesNotMatch(
+    workflow,
+    /"\$\{comment_author_association\}" != "\$\{AUTHOR_ASSOCIATION\}"/u,
+  );
 });
 
 test("[1] актуальный и устаревший SHA события выбирают текущий Head", () => {
@@ -490,6 +498,58 @@ test("[2] ручной запуск вне main и из форка разреш�
     assert.doesNotMatch(acknowledgeJob, /base\.ref|head\.repo/u);
     assert.doesNotMatch(manualJob, /base\.ref|head\.repo|draft/u);
   }
+});
+
+test("ручной запуск допускает регистр логина и разные доверенные снимки роли", () => {
+  const headSha = "d".repeat(40);
+  const comment = JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: "/review-all",
+    user: { login: "Alice" },
+    author_association: "COLLABORATOR",
+  });
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMENT_ID: "91",
+      AUTHOR_ASSOCIATION: "MEMBER",
+      TRIGGER: "manual",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      TRIGGER_ACTOR: "alice",
+      MOCK_COMMENT_JSON: comment,
+      MOCK_PR_JSON: prFixture({ headSha }),
+    }),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, new RegExp(`^head_sha=${headSha}$`, "mu"));
+});
+
+test("повторный API-запрос не доверяет фактической роли NONE", () => {
+  const comment = JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: "/review-all",
+    user: { login: "alice" },
+    author_association: "NONE",
+  });
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMENT_ID: "91",
+      AUTHOR_ASSOCIATION: "MEMBER",
+      TRIGGER: "manual",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      MOCK_COMMENT_JSON: comment,
+      MOCK_PR_JSON: prFixture(),
+    }),
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /Фактический автор комментария не имеет права/u);
 });
 
 test("[3] автоматический запуск вне main и из форка запрещён в обоих слоях", () => {
