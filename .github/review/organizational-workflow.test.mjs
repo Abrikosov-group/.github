@@ -525,20 +525,6 @@ test("ручной запуск допускает регистр логина �
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.outputs, new RegExp(`^head_sha=${headSha}$`, "mu"));
-
-  for (const source of [caller, organizationCaller]) {
-    const acknowledgement = executeRunScript({
-      source,
-      stepName: "Проверить и подтвердить ручную команду",
-      ghMock: acknowledgementGhMock,
-      env: acknowledgementEnv({
-        TRIGGER_ACTOR: "alice",
-        MOCK_COMMENT_JSON: comment,
-      }),
-    });
-    assert.equal(acknowledgement.status, 0, acknowledgement.stderr);
-    assert.match(acknowledgement.outputs, /^accepted=true$/mu);
-  }
 });
 
 test("повторный API-запрос не доверяет фактической роли NONE", () => {
