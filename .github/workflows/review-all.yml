@@ -270,7 +270,7 @@ jobs:
                 exit 1
               fi
               case "${EVENT_ACTION}" in
-                opened|ready_for_review|synchronize|reopened) ;;
+                opened|ready_for_review|synchronize|reopened|edited) ;;
                 *)
                   echo "::error::Недопустимое автоматическое событие PR"
                   exit 1
@@ -293,6 +293,14 @@ jobs:
                     "${event_draft}" != "false" ]]; then
                 echo "::error::Событие не совпадает с безопасным снимком готового PR"
                 exit 1
+              fi
+              if [[ "${EVENT_ACTION}" == "edited" ]]; then
+                previous_base_ref="$(jq -er '.changes.base.ref.from' "${GITHUB_EVENT_PATH}")"
+                if [[ ! "${previous_base_ref}" =~ ^[A-Za-z0-9._/-]+$ ||
+                      "${previous_base_ref}" == "${event_base_ref}" ]]; then
+                  echo "::error::Событие edited не содержит фактическую смену base-ветки"
+                  exit 1
+                fi
               fi
               if ! base_ref_allowed "${AUTOMATIC_BASE_REFS}" "${event_base_ref}"; then
                 echo "::error::Base-ветка ${event_base_ref} не разрешена для автозапуска"
