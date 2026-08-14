@@ -243,8 +243,8 @@ function prFixture({
   });
 }
 
-function automaticEvent(headSha, baseRef = "main") {
-  return {
+function automaticEvent(headSha, baseRef = "main", changes) {
+  const event = {
     pull_request: {
       number: 17,
       base: { ref: baseRef },
@@ -252,6 +252,10 @@ function automaticEvent(headSha, baseRef = "main") {
       draft: false,
     },
   };
+  if (changes !== undefined) {
+    event.changes = changes;
+  }
+  return event;
 }
 
 function reaction(id, content, login = "github-actions[bot]") {
@@ -665,6 +669,40 @@ test("[3] автоматический запуск вне разрешённы�
   assert.match(stagingResult.outputs, /^base_ref=staging$/mu);
 });
 
+test("смена base-ветки повторно запускает ревью, а прочее edited-событие отклоняется", () => {
+  const headSha = "f".repeat(40);
+  const changedBase = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent(headSha, "staging", {
+      base: { ref: { from: "release@2026/ветка+gate" } },
+    }),
+    env: contextEnv({
+      EVENT_ACTION: "edited",
+      EXPECTED_HEAD_SHA: headSha,
+      AUTOMATIC_BASE_REFS: "main,staging",
+      MOCK_PR_JSON: prFixture({ baseRef: "staging", headSha }),
+    }),
+  });
+  assert.equal(changedBase.status, 0, changedBase.stderr);
+  assert.match(changedBase.outputs, /^base_ref=staging$/mu);
+
+  const titleOnlyEdit = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent(headSha, "staging", {
+      title: { from: "Старый заголовок" },
+    }),
+    env: contextEnv({
+      EVENT_ACTION: "edited",
+      EXPECTED_HEAD_SHA: headSha,
+      AUTOMATIC_BASE_REFS: "main,staging",
+      MOCK_PR_JSON: prFixture({ baseRef: "staging", headSha }),
+    }),
+  });
+  assert.notEqual(titleOnlyEdit.status, 0);
+});
+
 test("[7–10] центральная очередь едина для manual и automatic одного PR", () => {
   const concurrency = workflow.match(/\nconcurrency:\n[\s\S]*?\n\njobs:/u)?.[0];
   assert.ok(concurrency);
@@ -732,7 +770,8 @@ test("разрешённые base-ветки параметризованы, а 
 
 test("автоматический источник закрепляет точный Head готового PR", () => {
   assert.match(workflow, /EVENT_NAME: \$\{\{ github\.event_name \}\}/u);
-  assert.match(workflow, /opened\|ready_for_review\|synchronize\|reopened/u);
+  assert.match(workflow, /opened\|ready_for_review\|synchronize\|reopened\|edited/u);
+  assert.match(workflow, /\.changes\.base\.ref\.from/u);
   assert.match(workflow, /event_head_repository/u);
   assert.match(workflow, /event_draft/u);
   assert.match(workflow, /head_sha\}" != "\$\{EXPECTED_HEAD_SHA\}/u);
