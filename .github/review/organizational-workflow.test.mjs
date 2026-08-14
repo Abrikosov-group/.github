@@ -17,6 +17,7 @@ const caller = readFileSync("workflow-templates/review-all.yml", "utf8");
 const organizationCaller = readFileSync(".github/workflows/review-all-trigger.yml", "utf8");
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
+const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
 
 function extractJob(source, jobId) {
   const match = source.match(new RegExp(`\\n  ${jobId}:[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:|$)`, "u"));
@@ -408,6 +409,10 @@ test("исполняемый организационный код закреп�
   );
   assert.doesNotMatch(caller, /review-all\.yml@main/u);
   assert.doesNotMatch(organizationCaller, /review-all\.yml@main/u);
+  const reviewedWorkflowReference =
+    `Abrikosov-group/.github/.github/workflows/review-all.yml@${reviewedWorkflowSha}`;
+  assert.equal(caller.split(reviewedWorkflowReference).length - 1, 2);
+  assert.equal(organizationCaller.split(reviewedWorkflowReference).length - 1, 2);
 });
 
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
@@ -815,6 +820,12 @@ test("шаблон запускает ревью автоматически и �
   assert.match(caller, /ready_for_review/u);
   assert.match(caller, /synchronize/u);
   assert.match(caller, /reopened/u);
+  assert.match(caller, /edited/u);
+  assert.match(caller, /github\.event\.changes\.base\.ref\.from != null/u);
+  assert.match(
+    caller,
+    /github\.event\.changes\.base\.ref\.from != github\.event\.pull_request\.base\.ref/u,
+  );
   assert.match(caller, /github\.event\.comment\.body == '\/review-all'/u);
   assert.match(caller, /trigger: manual/u);
   assert.match(caller, /trigger: automatic/u);
@@ -841,6 +852,12 @@ test("центральный репозиторий сам слушает ком
   assert.match(organizationCaller, /ready_for_review/u);
   assert.match(organizationCaller, /synchronize/u);
   assert.match(organizationCaller, /reopened/u);
+  assert.match(organizationCaller, /edited/u);
+  assert.match(organizationCaller, /github\.event\.changes\.base\.ref\.from != null/u);
+  assert.match(
+    organizationCaller,
+    /github\.event\.changes\.base\.ref\.from != github\.event\.pull_request\.base\.ref/u,
+  );
   assert.match(organizationCaller, /trigger: manual/u);
   assert.match(organizationCaller, /trigger: automatic/u);
   assert.match(
