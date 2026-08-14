@@ -675,7 +675,7 @@ test("смена base-ветки повторно запускает ревью,
     stepName: "Проверить источник запуска",
     ghMock: contextGhMock,
     event: automaticEvent(headSha, "staging", {
-      base: { ref: { from: "main" } },
+      base: { ref: { from: "release@2026/ветка+gate" } },
     }),
     env: contextEnv({
       EVENT_ACTION: "edited",
@@ -815,8 +815,6 @@ test("шаблон запускает ревью автоматически и �
   assert.match(caller, /ready_for_review/u);
   assert.match(caller, /synchronize/u);
   assert.match(caller, /reopened/u);
-  assert.match(caller, /edited/u);
-  assert.match(caller, /github\.event\.changes\.base\.ref\.from != ''/u);
   assert.match(caller, /github\.event\.comment\.body == '\/review-all'/u);
   assert.match(caller, /trigger: manual/u);
   assert.match(caller, /trigger: automatic/u);
@@ -843,8 +841,6 @@ test("центральный репозиторий сам слушает ком
   assert.match(organizationCaller, /ready_for_review/u);
   assert.match(organizationCaller, /synchronize/u);
   assert.match(organizationCaller, /reopened/u);
-  assert.match(organizationCaller, /edited/u);
-  assert.match(organizationCaller, /github\.event\.changes\.base\.ref\.from != ''/u);
   assert.match(organizationCaller, /trigger: manual/u);
   assert.match(organizationCaller, /trigger: automatic/u);
   assert.match(

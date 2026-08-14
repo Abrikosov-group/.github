@@ -295,9 +295,14 @@ jobs:
                 exit 1
               fi
               if [[ "${EVENT_ACTION}" == "edited" ]]; then
-                previous_base_ref="$(jq -er '.changes.base.ref.from' "${GITHUB_EVENT_PATH}")"
-                if [[ ! "${previous_base_ref}" =~ ^[A-Za-z0-9._/-]+$ ||
-                      "${previous_base_ref}" == "${event_base_ref}" ]]; then
+                previous_base_ref="$(jq -r '
+                  if (.changes.base.ref.from | type) == "string" then
+                    .changes.base.ref.from
+                  else
+                    empty
+                  end
+                ' "${GITHUB_EVENT_PATH}")"
+                if [[ -z "${previous_base_ref}" || "${previous_base_ref}" == "${event_base_ref}" ]]; then
                   echo "::error::Событие edited не содержит фактическую смену base-ветки"
                   exit 1
                 fi
