@@ -26,6 +26,11 @@ const REVIEW_MODELS = new Map([
     marker: "codex-review",
     reviewer: "Codex",
   }],
+  ["gpt-5.6-sol", {
+    displayName: "GPT-5.6 Sol",
+    marker: "codex-review",
+    reviewer: "Codex",
+  }],
 ]);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 const HIDDEN_CONTENT_PATTERN = /<!--|-->|[\u200b-\u200f\u2060\ufeff]/iu;
@@ -297,7 +302,7 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
   }
   if (!REVIEW_MODELS.has(reviewModel)) {
     throw new Error(
-      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5 или gpt-5.3-codex-spark.",
+      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5, gpt-5.3-codex-spark или gpt-5.6-sol.",
     );
   }
   return `<!-- ${REVIEW_MODELS.get(reviewModel).marker}:${baseSha}:${headSha}:${reviewModel} -->`;

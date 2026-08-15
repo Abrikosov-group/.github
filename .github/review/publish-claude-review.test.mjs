@@ -23,6 +23,7 @@ const HEAD_SHA = "2".repeat(40);
 const STANDARD_MODEL = "claude-sonnet-5";
 const DEEP_MODEL = "claude-opus-5";
 const SPARK_MODEL = "gpt-5.3-codex-spark";
+const SOL_MODEL = "gpt-5.6-sol";
 
 function findingsMarker({ p0 = 0, p1 = 0, p2 = 0 } = {}) {
   return `<!-- review-findings:P0=${p0};P1=${p1};P2=${p2} -->`;
@@ -312,6 +313,17 @@ test("создаёт отдельное русское ревью GPT-5.3-Codex-
   assert.match(payload.body, /### Ревью Codex/u);
   assert.match(payload.body, /GPT-5\.3-Codex-Spark, усилие `xhigh`/u);
   assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
+});
+
+test("создаёт отдельное русское ревью GPT-5.6 Sol", () => {
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, SOL_MODEL);
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, SOL_MODEL);
+
+  assert.match(marker, /^<!-- codex-review:/u);
+  assert.ok(payload.body.startsWith(marker));
+  assert.match(payload.body, /### Ревью Codex/u);
+  assert.match(payload.body, /GPT-5\.6 Sol, усилие `xhigh`/u);
+  assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, SPARK_MODEL));
 });
 
 test("читает структурированный результат Codex из доверенного файла", async () => {
