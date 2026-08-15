@@ -31,8 +31,9 @@ const REVIEW_MODELS = new Map([
   }],
 ]);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
-const UNSAFE_BINARY_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>]/u;
-const HIDDEN_CONTENT_PATTERN = /<!--|-->|[\u200b-\u200f\u2060\ufeff]/iu;
+const INVISIBLE_UNICODE_PATTERN = /\p{Cf}/gu;
+const UNSAFE_BINARY_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>\p{Cf}]/u;
+const HIDDEN_CONTENT_PATTERN = /<!--|-->|\p{Cf}/iu;
 const SENSITIVE_DATA_PATTERNS = [
   /(?:sk-ant-|github_pat_|gh[pousr]_)[A-Za-z0-9._-]{8,}/iu,
   /\b(?:sk-proj-|sk-svcacct-|xox[baprs]-)[A-Za-z0-9_-]{16,}\b/iu,
@@ -46,6 +47,22 @@ const SENSITIVE_DATA_PATTERNS = [
 
 function containsSensitiveData(value) {
   return SENSITIVE_DATA_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function makeInvisibleUnicodeVisible(value, label) {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const deobfuscated = value.replace(INVISIBLE_UNICODE_PATTERN, "");
+  if (containsSensitiveData(deobfuscated)) {
+    throw new Error(`${label} похоже на секрет или персональные данные; публикация остановлена.`);
+  }
+
+  return value.replace(
+    INVISIBLE_UNICODE_PATTERN,
+    (character) => `U+${character.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`,
+  );
 }
 
 function assertPlainObject(value, label) {
@@ -153,13 +170,13 @@ export function validateReviewJson(rawReview) {
       throw new Error(`${label}: side должен быть LEFT или RIGHT.`);
     }
 
-    const title = assertSafeText(finding.title, {
+    const title = assertSafeText(makeInvisibleUnicodeVisible(finding.title, `${label}: title`), {
       label: `${label}: title`,
       maximumLength: MAX_TITLE_LENGTH,
       multiline: false,
       requireRussian: true,
     });
-    const body = assertSafeText(finding.body, {
+    const body = assertSafeText(makeInvisibleUnicodeVisible(finding.body, `${label}: body`), {
       label: `${label}: body`,
       maximumLength: MAX_BODY_LENGTH,
       multiline: true,

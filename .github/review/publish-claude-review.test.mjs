@@ -132,6 +132,27 @@ test("валидирует строгий результат Claude", () => {
   assert.deepEqual(validateReviewJson(JSON.stringify(validReview())), validReview());
 });
 
+test("делает видимыми Unicode-символы из сбоя запуска 31894613583", () => {
+  const review = validReview();
+  review.findings[0].body =
+    "Фильтр должен распознавать невидимые символы (\u200b-\u200f, \u2060, \ufeff) в имени файла.";
+
+  const validated = validateReviewJson(review);
+
+  assert.equal(
+    validated.findings[0].body,
+    "Фильтр должен распознавать невидимые символы (U+200B-U+200F, U+2060, U+FEFF) в имени файла.",
+  );
+  assert.doesNotMatch(validated.findings[0].body, /\p{Cf}/u);
+});
+
+test("после нормализации по-прежнему отклоняет скрытую разметку", () => {
+  const review = validReview();
+  review.findings[0].body = "Проверка пропускает <!-- служебный маркер --> внутри результата.";
+
+  assert.throws(() => validateReviewJson(review), /скрытую разметку/u);
+});
+
 test("отклоняет неизвестные поля и обход пути", () => {
   assert.throws(
     () => validateReviewJson({ ...validReview(), summary: "лишнее" }),
@@ -157,6 +178,10 @@ test("отклоняет дубли одной строки и похожие н
   const leakedSecret = validReview();
   leakedSecret.findings[0].body = `Утечка sk-ant-${"a".repeat(24)}`;
   assert.throws(() => validateReviewJson(leakedSecret), /похоже на секрет/u);
+
+  const obfuscatedSecret = validReview();
+  obfuscatedSecret.findings[0].body = `Утечка sk-ant-\u200b${"a".repeat(24)}`;
+  assert.throws(() => validateReviewJson(obfuscatedSecret), /похоже на секрет/u);
 
   const telegramToken = validReview();
   telegramToken.findings[0].body = `Утечка 123456789:AA${"b".repeat(33)}`;
@@ -336,6 +361,10 @@ test("публикует точную границу binary coverage и дове
   );
   assert.throws(
     () => validateBinaryManifest(binaryManifest([{ oldPath: null, newPath: "danger`marker.pdf" }]), BASE_SHA, HEAD_SHA),
+    /допустимый path/u,
+  );
+  assert.throws(
+    () => validateBinaryManifest(binaryManifest([{ oldPath: null, newPath: "danger\u200bmarker.pdf" }]), BASE_SHA, HEAD_SHA),
     /допустимый path/u,
   );
 });

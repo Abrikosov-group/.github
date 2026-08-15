@@ -17,7 +17,7 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)$/u;
-const UNSAFE_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>]/u;
+const UNSAFE_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>\p{Cf}]/u;
 
 function requireEnvironment(environment, name) {
   const value = environment[name];

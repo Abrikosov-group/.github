@@ -116,6 +116,7 @@ function executeRunScript({
 
 const contextGhMock = `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
 case "$*" in
   *"/issues/comments/"*) printf '%s\n' "\${MOCK_COMMENT_JSON}" ;;
   *"/collaborators/"*"/permission"*) printf '%s\n' "\${MOCK_PERMISSION:-write}" ;;
@@ -289,10 +290,13 @@ function prFixture({
   headRepository = "Abrikosov-group/project",
   state = "open",
   draft = false,
+  authorLogin = "pr-author",
+  authorId = 101,
 } = {}) {
   return JSON.stringify({
     state,
     draft,
+    user: { login: authorLogin, id: authorId },
     base: { ref: baseRef, sha: baseSha },
     head: { sha: headSha, repo: { full_name: headRepository } },
   });
@@ -573,6 +577,7 @@ test("Claude не получает инструменты записи, shell и
     /permissions:\n\s+actions: read\n\s+contents: read\n\s+issues: read\n\s+pull-requests: read/u,
   );
   assert.match(workflow, /Не включай HTML-теги, HTML-комментарии или служебные маркеры/u);
+  assert.equal(workflow.split("фактические форматирующие Unicode-символы").length - 1, 2);
   assert.doesNotMatch(extractJob(workflow, "analyze-claude"), /path: pr-head|--add-dir|Read\(\.\/pr-head/u);
 });
 
@@ -632,7 +637,7 @@ test("ручной источник проверяется без хрупких
   );
 });
 
-test("binary disposition доходит до live-проверки без доверия к author_association", () => {
+test("автор PR запускает binary disposition без write и доверия к author_association", () => {
   const command = `/binary-disposition\n${JSON.stringify({ schemaVersion: 1 })}`;
   const result = executeRunScript({
     stepName: "Проверить источник запуска",
@@ -659,6 +664,56 @@ test("binary disposition доходит до live-проверки без дов
   assert.match(result.outputs, /^trigger=disposition$/mu);
   assert.match(result.outputs, /^mode=all$/mu);
   assert.doesNotMatch(result.ghLog, /collaborators/u);
+});
+
+test("неавтор запускает binary disposition только с live write", () => {
+  const command = `/binary-disposition\n${JSON.stringify({ schemaVersion: 1 })}`;
+  const comment = JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: command,
+    user: { login: "writer", id: 202 },
+    author_association: "NONE",
+  });
+  const allowed = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMAND: command,
+      TRIGGER: "disposition",
+      COMMENT_ID: "92",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      AUTHOR_ASSOCIATION: "NONE",
+      TRIGGER_ACTOR: "writer",
+      MOCK_COMMENT_JSON: comment,
+      MOCK_PR_JSON: prFixture(),
+      MOCK_PERMISSION: "write",
+    }),
+  });
+
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.match(allowed.ghLog, /collaborators\/writer\/permission/u);
+
+  const denied = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMAND: command,
+      TRIGGER: "disposition",
+      COMMENT_ID: "92",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      AUTHOR_ASSOCIATION: "MEMBER",
+      TRIGGER_ACTOR: "writer",
+      MOCK_COMMENT_JSON: comment,
+      MOCK_PR_JSON: prFixture(),
+      MOCK_PERMISSION: "read",
+    }),
+  });
+
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stdout, /не имеет доступа write/u);
+  assert.doesNotMatch(denied.outputs, /^trigger=/mu);
 });
 
 test("[1] актуальный и устаревший SHA события выбирают текущий Head", () => {

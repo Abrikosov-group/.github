@@ -162,6 +162,23 @@ test("неполный список, пустое обоснование и stal
   assert.throws(() => validateDisposition(stale, context), /exact Head/u);
 });
 
+test("невидимый Unicode в binary path отклоняется до проверки disposition", () => {
+  const hiddenPath = "assets/font\u202e.woff2";
+  const hiddenManifest = manifest([hiddenPath]);
+  const hiddenDisposition = disposition([hiddenPath]);
+  hiddenDisposition.binaryManifestSha256 = hiddenManifest.binaryManifestSha256;
+
+  assert.throws(
+    () => validateDisposition(hiddenDisposition, {
+      manifest: hiddenManifest,
+      actor: PR_AUTHOR,
+      permission: "none",
+      prAuthor: PR_AUTHOR,
+    }),
+    /path/u,
+  );
+});
+
 test("automated-check принимает только успешный run exact Head того же репозитория", async () => {
   const value = disposition();
   value.files[0] = {
