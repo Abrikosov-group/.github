@@ -487,9 +487,12 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
   assertMatchingEntries(rawEntries, numstatEntries);
 
   const objectCache = new Map();
-  const object = async (oid) => {
+  const object = async (oid, mode) => {
     if (oid === null) {
       return null;
+    }
+    if (mode === "160000") {
+      return { objectType: "gitlink", blob: null, binary: false };
     }
     if (!objectCache.has(oid)) {
       objectCache.set(oid, inspectObject(oid));
@@ -500,8 +503,8 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
   const files = [];
   for (let index = 0; index < rawEntries.length; index += 1) {
     const entry = rawEntries[index];
-    const oldObject = await object(entry.oldOid);
-    const newObject = await object(entry.newOid);
+    const oldObject = await object(entry.oldOid, entry.oldMode);
+    const newObject = await object(entry.newOid, entry.newMode);
     const unsafePath = [entry.oldPath, entry.newPath]
       .some((path) => path !== null && !path.modelSafe);
     const binaryExtension = [entry.oldPath, entry.newPath]

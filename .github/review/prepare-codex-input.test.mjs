@@ -252,19 +252,24 @@ test("утилита отклоняет неизвестные аргумент�
 test("gitlink не читается как blob и не попадает в binary manifest", (context) => {
   const root = mkdtempSync(join(tmpdir(), "prepare-codex-gitlink-"));
   context.after(() => rmSync(root, { recursive: true, force: true }));
+  const dependency = join(root, "dependency");
+  mkdirSync(dependency);
+  git(dependency, "init", "--quiet", "--initial-branch=main");
+  write(dependency, "dependency.txt", "first\n");
+  git(dependency, "add", "--all");
+  git(dependency, "commit", "--quiet", "-m", "Первый внешний commit");
+  const firstTarget = git(dependency, "rev-parse", "HEAD");
+  write(dependency, "dependency.txt", "second\n");
+  git(dependency, "add", "--all");
+  git(dependency, "commit", "--quiet", "-m", "Второй внешний commit");
+  const secondTarget = git(dependency, "rev-parse", "HEAD");
+
   const repository = join(root, "repository");
   mkdirSync(repository);
   git(repository, "init", "--quiet", "--initial-branch=main");
   write(repository, "README.md", "base\n");
   git(repository, "add", "--all");
   git(repository, "commit", "--quiet", "-m", "Первый commit");
-  const firstTarget = git(repository, "rev-parse", "HEAD");
-  const tree = git(repository, "rev-parse", "HEAD^{tree}");
-  const secondTarget = run(
-    "git",
-    ["commit-tree", tree, "-p", firstTarget, "-m", "Второй объект commit"],
-    { cwd: repository },
-  ).stdout.trim();
 
   git(repository, "update-index", "--add", "--cacheinfo", `160000,${firstTarget},vendor/dependency`);
   git(repository, "commit", "--quiet", "-m", "Добавить gitlink");
@@ -273,6 +278,15 @@ test("gitlink не читается как blob и не попадает в bina
   git(repository, "update-index", "--cacheinfo", `160000,${secondTarget},vendor/dependency`);
   git(repository, "commit", "--quiet", "-m", "Обновить gitlink");
   const headSha = git(repository, "rev-parse", "HEAD");
+
+  assert.equal(run("git", ["cat-file", "-e", firstTarget], {
+    cwd: repository,
+    allowFailure: true,
+  }).status, 1);
+  assert.equal(run("git", ["cat-file", "-e", secondTarget], {
+    cwd: repository,
+    allowFailure: true,
+  }).status, 1);
 
   const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
   const manifest = JSON.parse(prepared.manifest);
