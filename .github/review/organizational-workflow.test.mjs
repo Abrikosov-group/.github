@@ -585,6 +585,20 @@ test("обе модели получают один формат безопас�
   assert.doesNotMatch(workflow, /git diff[^\n]*> "\$\{GITHUB_WORKSPACE\}\/\.review-input/u);
 });
 
+test("публикация Claude не запускается без созданного input artifact", () => {
+  const analyzeJob = extractJob(workflow, "analyze-claude");
+  const publishJob = extractJob(workflow, "publish-claude");
+  assert.match(
+    analyzeJob,
+    /- name: Передать безопасный вход издателю\n\s+if: steps\.existing\.outputs\.needed == 'true'/u,
+  );
+  assert.match(
+    publishJob,
+    /if: needs\.analyze-claude\.outputs\.review_needed == 'true'/u,
+  );
+  assert.match(publishJob, /name: claude-review-input/u);
+});
+
 test("Claude запускается из точного доверенного Base checkout", () => {
   const baseCheckout = workflow.match(
     /- name: Получить точный Base в защищённый корень[\s\S]*?(?=\n      - name:)/u,

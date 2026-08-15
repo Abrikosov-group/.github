@@ -204,7 +204,7 @@ async function verifyAutomatedRuns(record, repository, headSha, token, fetchImpl
 
 async function allComments(fetchImplementation, repository, pullNumber, token) {
   const result = [];
-  for (let page = 1; page <= 20; page += 1) {
+  for (let page = 1; ; page += 1) {
     const comments = await githubRequest(
       fetchImplementation,
       `/repos/${repository}/issues/${pullNumber}/comments?per_page=100&page=${page}`,
@@ -215,7 +215,6 @@ async function allComments(fetchImplementation, repository, pullNumber, token) {
       return result;
     }
   }
-  throw new Error("В PR больше 2000 комментариев; disposition нельзя проверить полностью.");
 }
 
 export async function evaluateBinaryDisposition({ manifest, repository, pullNumber, token, fetchImplementation }) {

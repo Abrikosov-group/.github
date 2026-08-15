@@ -198,3 +198,39 @@ test("при нулевом manifest coverage закрывается без disp
   assert.equal(result.coverageClosed, true);
   assert.match(result.summary, /нет/u);
 });
+
+test("disposition на 21-й странице не теряется из-за лимита пагинации", async () => {
+  const validComment = {
+    id: 2_001,
+    user: PR_AUTHOR,
+    body: commentBody(disposition()),
+    html_url: "comment-2001",
+  };
+  const fetchImplementation = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/repos/Abrikosov-group/example/pulls/7") {
+      return response({ head: { sha: HEAD_SHA }, user: PR_AUTHOR });
+    }
+    if (parsed.pathname === "/repos/Abrikosov-group/example/issues/7/comments") {
+      const page = Number.parseInt(parsed.searchParams.get("page"), 10);
+      return response(page <= 20
+        ? Array.from({ length: 100 }, (_, index) => ({
+            id: (page - 1) * 100 + index + 1,
+            user: { login: "observer", id: 500 },
+            body: "обычный комментарий",
+          }))
+        : [validComment]);
+    }
+    return response({ message: `Unexpected ${parsed.pathname}${parsed.search}` }, 500);
+  };
+
+  const result = await evaluateBinaryDisposition({
+    manifest: manifest(),
+    repository: REPOSITORY,
+    pullNumber: 7,
+    token: "test",
+    fetchImplementation,
+  });
+  assert.equal(result.coverageClosed, true);
+  assert.equal(result.disposition.commentId, 2_001);
+});
