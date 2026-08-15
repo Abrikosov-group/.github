@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const MAX_FINDINGS = 20;
 const MAX_PATH_LENGTH = 512;
+const MAX_BINARY_PATH_LENGTH = 16_384;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 2_000;
 const MAX_DIFF_BYTES = 50 * 1024 * 1024;
@@ -10,6 +12,7 @@ const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const REVIEW_FINDINGS_PATTERN = /<!-- review-findings:P0=([0-9]+);P1=([0-9]+);P2=([0-9]+) -->/gu;
+const BINARY_COVERAGE_PATTERN = /<!-- review-binary-coverage:sha256=([0-9a-f]{64});files=([0-9]+) -->/gu;
 const REVIEW_MODELS = new Map([
   ["claude-sonnet-5", {
     displayName: "Claude Sonnet 5",
@@ -28,6 +31,7 @@ const REVIEW_MODELS = new Map([
   }],
 ]);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
+const UNSAFE_BINARY_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>]/u;
 const HIDDEN_CONTENT_PATTERN = /<!--|-->|[\u200b-\u200f\u2060\ufeff]/iu;
 const SENSITIVE_DATA_PATTERNS = [
   /(?:sk-ant-|github_pat_|gh[pousr]_)[A-Za-z0-9._-]{8,}/iu,
@@ -308,7 +312,7 @@ export function buildReviewPayload(
   baseSha,
   headSha,
   reviewModel,
-  { unanchoredFindings = [] } = {},
+  { unanchoredFindings = [], binaryManifest = null } = {},
 ) {
   const model = REVIEW_MODELS.get(reviewModel);
   reviewMarker(baseSha, headSha, reviewModel);
@@ -334,18 +338,25 @@ export function buildReviewPayload(
           `  ${finding.body.replaceAll("\n", "\n  ")}`,
         ]),
       ];
+  const binaryCoverage = binaryManifest === null
+    ? []
+    : buildBinaryCoverageSection(binaryManifest);
 
   return {
     commit_id: headSha,
     body: [
       reviewMarker(baseSha, headSha, reviewModel),
       `<!-- review-findings:P0=${counts.P0};P1=${counts.P1};P2=${counts.P2} -->`,
+      ...(binaryManifest === null
+        ? []
+        : [`<!-- review-binary-coverage:sha256=${binaryManifest.binaryManifestSha256};files=${binaryManifest.files.length} -->`]),
       `### Ревью ${model.reviewer}`,
       "",
       `**Модель:** ${model.displayName}, усилие \`xhigh\`.`,
       "",
       summary,
       ...unanchoredSection,
+      ...binaryCoverage,
       "",
       `_Проверен commit \`${headSha}\`._`,
     ].join("\n"),
@@ -357,6 +368,82 @@ export function buildReviewPayload(
       body: `[${finding.priority}] ${finding.title}\n\n${finding.body}`,
     })),
   };
+}
+
+export function validateBinaryManifest(rawManifest, baseSha, headSha) {
+  let manifest;
+  try {
+    manifest = typeof rawManifest === "string" ? JSON.parse(rawManifest) : rawManifest;
+  } catch {
+    throw new Error("Binary manifest содержит некорректный JSON.");
+  }
+  assertPlainObject(manifest, "Binary manifest");
+  assertExactKeys(
+    manifest,
+    ["schemaVersion", "baseSha", "mergeBaseSha", "headSha", "binaryManifestSha256", "files"],
+    "Binary manifest",
+  );
+  if (
+    manifest.schemaVersion !== 1 ||
+    manifest.baseSha !== baseSha ||
+    manifest.headSha !== headSha ||
+    !SHA_PATTERN.test(manifest.mergeBaseSha) ||
+    !/^[0-9a-f]{64}$/u.test(manifest.binaryManifestSha256) ||
+    !Array.isArray(manifest.files)
+  ) {
+    throw new Error("Binary manifest не соответствует зафиксированному снимку PR.");
+  }
+  const calculatedHash = createHash("sha256")
+    .update(JSON.stringify(manifest.files))
+    .digest("hex");
+  if (calculatedHash !== manifest.binaryManifestSha256) {
+    throw new Error("binaryManifestSha256 не совпадает с полным списком manifest.");
+  }
+  const paths = new Set();
+  for (const [index, file] of manifest.files.entries()) {
+    assertPlainObject(file, `Binary manifest file ${index + 1}`);
+    const path = file.newPath ?? file.oldPath;
+    if (
+      typeof path !== "string" ||
+      path.length === 0 ||
+      path.length > MAX_BINARY_PATH_LENGTH ||
+      UNSAFE_BINARY_PATH_PATTERN.test(path)
+    ) {
+      throw new Error(`Binary manifest file ${index + 1} не содержит допустимый path.`);
+    }
+    if (paths.has(path)) {
+      throw new Error(`Binary manifest содержит повторяющийся path: ${JSON.stringify(path)}.`);
+    }
+    paths.add(path);
+  }
+  return manifest;
+}
+
+export function buildBinaryCoverageSection(manifest) {
+  if (manifest.files.length === 0) {
+    return ["", "### Граница проверки бинарных файлов", "", "Непроверенных бинарных файлов нет."];
+  }
+  return [
+    "",
+    "### Граница проверки бинарных файлов",
+    "",
+    `Непроверенных бинарных файлов: **${manifest.files.length}**.`,
+    "Содержимое перечисленных файлов моделью не проверялось:",
+    "",
+    ...manifest.files.map((file) => `- \`${(file.newPath ?? file.oldPath).replaceAll("`", "\\`")}\``),
+    "",
+    `Binary manifest: \`${manifest.binaryManifestSha256}\`.`,
+  ];
+}
+
+export function trustedBinaryCoverage(review, manifest) {
+  if (typeof review?.body !== "string") {
+    return false;
+  }
+  const matches = [...review.body.matchAll(BINARY_COVERAGE_PATTERN)];
+  return matches.length === 1 &&
+    matches[0][1] === manifest.binaryManifestSha256 &&
+    Number.parseInt(matches[0][2], 10) === manifest.files.length;
 }
 
 export function buildStaleReviewBody(baseSha, headSha, reviewModel) {
@@ -496,6 +583,7 @@ export async function reviewNeeded({
   token,
   publisherLogin = "github-actions[bot]",
   forceReview = false,
+  binaryManifest = null,
 }) {
   validateRequestContext({ repository, pullNumber, baseSha, headSha, reviewModel });
 
@@ -515,7 +603,8 @@ export async function reviewNeeded({
     token,
     publisherLogin,
   });
-  return trustedReviewBlockingFindings(existingReview) === null;
+  return trustedReviewBlockingFindings(existingReview) === null ||
+    (binaryManifest !== null && !trustedBinaryCoverage(existingReview, binaryManifest));
 }
 
 async function checkReviewNeededFromEnvironment() {
@@ -551,6 +640,10 @@ export async function main() {
     ? readFileSync(process.env.REVIEW_JSON_FILE, "utf8")
     : requireEnvironment("REVIEW_JSON");
   const review = validateReviewJson(rawReview);
+  const rawManifest = process.env.BINARY_MANIFEST_PATH
+    ? readFileSync(process.env.BINARY_MANIFEST_PATH, "utf8")
+    : requireEnvironment("BINARY_MANIFEST_JSON");
+  const binaryManifest = validateBinaryManifest(rawManifest, baseSha, headSha);
 
   if (!/^[1-9]\d*$/u.test(rawPullNumber)) {
     throw new Error("PR_NUMBER должен быть положительным целым числом.");
@@ -572,7 +665,11 @@ export async function main() {
     publisherLogin,
   });
   const existingBlockingFindings = trustedReviewBlockingFindings(existingReview);
-  if (existingBlockingFindings !== null && !forceReview) {
+  if (
+    existingBlockingFindings !== null &&
+    trustedBinaryCoverage(existingReview, binaryManifest) &&
+    !forceReview
+  ) {
     writeWorkflowOutput("blocking_findings", existingBlockingFindings);
     console.log(`Ревью этого diff уже опубликовано: ${existingReview.html_url}`);
     return;
@@ -603,7 +700,7 @@ export async function main() {
       baseSha,
       headSha,
       reviewModel,
-      { unanchoredFindings: unanchored },
+      { unanchoredFindings: unanchored, binaryManifest },
     ),
     token,
   });

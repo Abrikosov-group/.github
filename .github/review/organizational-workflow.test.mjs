@@ -18,6 +18,11 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
+const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e0b175d72b86fcae0d2a7";
+
+function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
+  return `<!-- review-binary-coverage:sha256=${hash};files=${files} -->`;
+}
 
 function extractJob(source, jobId) {
   const match = source.match(new RegExp(`\\n  ${jobId}:[\\s\\S]*?(?=\\n  [a-z][a-z0-9-]*:|$)`, "u"));
@@ -84,6 +89,16 @@ function executeRunScript({
         GITHUB_WORKSPACE: root,
         RUNNER_TEMP: root,
         MOCK_GH_LOG: ghLogPath,
+        TRUSTED_WORKFLOW_REPOSITORY: "Abrikosov-group/.github",
+        TRUSTED_WORKFLOW_SHA: reviewedWorkflowSha,
+        BINARY_MANIFEST_SHA256: emptyManifestHash,
+        BINARY_FILES: "0",
+        CODEX_BINARY_COVERAGE_CLOSED: "true",
+        CODEX_BINARY_COVERAGE_SUMMARY: "Непроверенных бинарных файлов нет.",
+        CODEX_BINARY_MANIFEST_SHA256: emptyManifestHash,
+        CLAUDE_BINARY_COVERAGE_CLOSED: "true",
+        CLAUDE_BINARY_COVERAGE_SUMMARY: "Непроверенных бинарных файлов нет.",
+        CLAUDE_BINARY_MANIFEST_SHA256: emptyManifestHash,
         ...env,
       },
     });
@@ -210,22 +225,41 @@ esac
 
 const codexInputNodeMock = `#!/usr/bin/env bash
 set -euo pipefail
+script="$1"
 shift
-diff_path=''
-manifest_path=''
-while (( $# > 0 )); do
-  case "$1" in
-    --base-sha|--merge-base-sha|--head-sha) shift 2 ;;
-    --diff-path) diff_path="$2"; shift 2 ;;
-    --manifest-path) manifest_path="$2"; shift 2 ;;
-    *) echo "unexpected node argument: $1" >&2; exit 64 ;;
-  esac
-done
-mkdir -p "$(dirname "\${diff_path}")" "$(dirname "\${manifest_path}")"
-printf '%s\n' 'diff --git a/file.txt b/file.txt' > "\${diff_path}"
-printf '%s\n' '{"schemaVersion":1,"files":[]}' > "\${manifest_path}"
-printf '{"diffBytes":%s,"manifestBytes":%s,"binaryFiles":0}\n' \
-  "$(wc -c < "\${diff_path}")" "$(wc -c < "\${manifest_path}")"
+case "\${script}" in
+  *prepare-codex-input.mjs)
+    diff_path=''
+    manifest_path=''
+    while (( $# > 0 )); do
+      case "$1" in
+        --base-sha|--merge-base-sha|--head-sha) shift 2 ;;
+        --diff-path) diff_path="$2"; shift 2 ;;
+        --manifest-path) manifest_path="$2"; shift 2 ;;
+        *) echo "unexpected node argument: $1" >&2; exit 64 ;;
+      esac
+    done
+    mkdir -p "$(dirname "\${diff_path}")" "$(dirname "\${manifest_path}")"
+    printf '%s\n' 'diff --git a/file.txt b/file.txt' > "\${diff_path}"
+    printf '{"schemaVersion":1,"baseSha":"%s","mergeBaseSha":"%s","headSha":"%s","binaryManifestSha256":"%s","files":[]}\n' \
+      "\${BASE_SHA}" "\${BASE_SHA}" "\${HEAD_SHA}" '${emptyManifestHash}' > "\${manifest_path}"
+    printf '{"diffBytes":%s,"manifestBytes":%s,"binaryFiles":0,"binaryManifestSha256":"%s"}\n' \
+      "$(wc -c < "\${diff_path}")" "$(wc -c < "\${manifest_path}")" '${emptyManifestHash}'
+    ;;
+  *validate-binary-disposition.mjs)
+    output_path=''
+    while (( $# > 0 )); do
+      case "$1" in
+        --manifest-path) shift 2 ;;
+        --output-path) output_path="$2"; shift 2 ;;
+        *) echo "unexpected node argument: $1" >&2; exit 64 ;;
+      esac
+    done
+    mkdir -p "$(dirname "\${output_path}")"
+    printf '%s\n' '{"coverageClosed":true,"code":null,"summary":"Непроверенных бинарных файлов нет.","disposition":null}' | tee "\${output_path}"
+    ;;
+  *) echo "unexpected node script: \${script}" >&2; exit 64 ;;
+esac
 `;
 
 function contextEnv(overrides = {}) {
@@ -417,25 +451,27 @@ test("безопасный вход Codex строится от доказанн
   assert.match(workflow, /--head-sha "\$\{HEAD_SHA\}"/u);
   assert.match(
     prepareJob,
-    /repository: \$\{\{ job\.workflow_repository \}\}\n\s+ref: \$\{\{ job\.workflow_sha \}\}\n\s+path: _review_infra/u,
+    /repository: \$\{\{ inputs\.trusted_workflow_repository \}\}\n\s+ref: \$\{\{ inputs\.trusted_workflow_sha \}\}\n\s+path: _review_infra/u,
   );
-  assert.match(
-    workflow,
-    /git diff --no-ext-diff --no-textconv --no-color --find-renames --full-index/u,
-  );
+  assert.doesNotMatch(workflow, /job\.workflow_repository|job\.workflow_sha/u);
   assert.doesNotMatch(workflow, /git diff --binary/u);
   assert.match(workflow, /"\$\{merge_base\}" "\$\{HEAD_SHA\}"/u);
   assert.match(workflow, /BEGIN UNTRUSTED BINARY MANIFEST/u);
   assert.match(workflow, /binary-manifest\.json/u);
-  assert.match(workflow, /prompt_size="\$\(wc -c < "\$\{input_dir\}\/prompt\.txt"\)"/u);
-  assert.match(workflow, /if \(\( prompt_size > 524288 \)\)/u);
+  assert.match(workflow, /prompt_size="\$\(wc -c < "\$\{input_dir\}\/prompt\.txt" \| tr -d '\[:space:\]'\)"/u);
+  assert.match(workflow, /if \(\( projected_prompt_size > 524288 \)\)/u);
+  assert.ok(
+    workflow.indexOf("projected_prompt_size > 524288") <
+      workflow.indexOf('write_prompt \\\n            "${input_dir}/binary-manifest.json"'),
+  );
   assert.doesNotMatch(workflow, /application\/vnd\.github\.diff/u);
 });
 
 test("исполняемый организационный код закреплён полными SHA", () => {
   assert.doesNotMatch(workflow, /\n\s+ref: main\s*$/mu);
-  assert.match(workflow, /repository: \$\{\{ job\.workflow_repository \}\}/u);
-  assert.match(workflow, /ref: \$\{\{ job\.workflow_sha \}\}/u);
+  assert.match(workflow, /repository: \$\{\{ inputs\.trusted_workflow_repository \}\}/u);
+  assert.match(workflow, /ref: \$\{\{ inputs\.trusted_workflow_sha \}\}/u);
+  assert.doesNotMatch(workflow, /job\.workflow_repository|job\.workflow_sha/u);
   assert.match(
     caller,
     /Abrikosov-group\/\.github\/\.github\/workflows\/review-all\.yml@[0-9a-f]{40}/u,
@@ -532,8 +568,21 @@ test("обычное ревью Claude закреплено на Sonnet 5 с xhi
 test("Claude не получает инструменты записи, shell или сеть", () => {
   assert.match(workflow, /--tools "Read"/u);
   assert.match(workflow, /--disallowedTools "[^"]*Bash[^"]*WebFetch[^"]*WebSearch"/u);
-  assert.match(workflow, /permissions:\n\s+contents: read\n\s+pull-requests: read/u);
+  assert.match(
+    extractJob(workflow, "analyze-claude"),
+    /permissions:\n\s+actions: read\n\s+contents: read\n\s+issues: read\n\s+pull-requests: read/u,
+  );
   assert.match(workflow, /Не включай HTML-теги, HTML-комментарии или служебные маркеры/u);
+  assert.doesNotMatch(extractJob(workflow, "analyze-claude"), /path: pr-head|--add-dir|Read\(\.\/pr-head/u);
+});
+
+test("обе модели получают один формат безопасного diff и публикуют exact binary coverage", () => {
+  assert.equal(workflow.split("prepare-codex-input.mjs").length - 1, 2);
+  assert.equal(workflow.split("validate-binary-disposition.mjs").length - 1, 2);
+  assert.equal(workflow.split("BINARY_MANIFEST_PATH:").length - 1, 2);
+  assert.match(workflow, /review-binary-coverage:sha256=\$\{binary_manifest_sha256\};files=\$\{binary_files\}/u);
+  assert.match(workflow, /C42\.1: binary disposition отсутствует или недействителен/u);
+  assert.doesNotMatch(workflow, /git diff[^\n]*> "\$\{GITHUB_WORKSPACE\}\/\.review-input/u);
 });
 
 test("Claude запускается из точного доверенного Base checkout", () => {
@@ -567,6 +616,35 @@ test("ручной источник проверяется без хрупких
     workflow,
     /"\$\{comment_author_association\}" != "\$\{AUTHOR_ASSOCIATION\}"/u,
   );
+});
+
+test("binary disposition доходит до live-проверки без доверия к author_association", () => {
+  const command = `/binary-disposition\n${JSON.stringify({ schemaVersion: 1 })}`;
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMAND: command,
+      TRIGGER: "disposition",
+      COMMENT_ID: "92",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      AUTHOR_ASSOCIATION: "NONE",
+      TRIGGER_ACTOR: "pr-author",
+      MOCK_COMMENT_JSON: JSON.stringify({
+        issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+        body: command,
+        user: { login: "pr-author", id: 101 },
+        author_association: "NONE",
+      }),
+      MOCK_PR_JSON: prFixture(),
+    }),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, /^trigger=disposition$/mu);
+  assert.match(result.outputs, /^mode=all$/mu);
+  assert.doesNotMatch(result.ghLog, /collaborators/u);
 });
 
 test("[1] актуальный и устаревший SHA события выбирают текущий Head", () => {
@@ -1003,12 +1081,12 @@ test("[11] два существующих маркера не запускаю�
     {
       id: 101,
       user: { login: "github-actions[bot]" },
-      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
     },
     {
       id: 102,
       user: { login: "github-actions[bot]" },
-      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
     },
   ]]);
   const commonEnv = {
@@ -1034,7 +1112,7 @@ test("[11] два существующих маркера не запускаю�
     env: commonEnv,
   });
 
-  assert.equal(codex.status, 0, codex.stderr);
+  assert.equal(codex.status, 0, JSON.stringify({ stderr: codex.stderr, stdout: codex.stdout, outputs: codex.outputs }));
   assert.equal(claude.status, 0, claude.stderr);
   assert.match(codex.outputs, /^needed=false$/mu);
   assert.match(claude.outputs, /^needed=false$/mu);
@@ -1084,12 +1162,12 @@ test("повторно использованное ревью с P0–P2 не �
     {
       id: 201,
       user: { login: "github-actions[bot]" },
-      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->`,
+      body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->\n${binaryCoverageMarker()}`,
     },
     {
       id: 202,
       user: { login: "github-actions[bot]" },
-      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+      body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
     },
   ]]);
   const commonEnv = {
@@ -1180,6 +1258,43 @@ test("ручное ревью Claude с P0–P2 не показывает зел
   assert.doesNotMatch(finish.ghLog, /✅ Ручное ревью Claude завершено/u);
 });
 
+test("C42.1 оставляет итог и commit status красными без binary disposition", () => {
+  const headSha = "b".repeat(40);
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      HEAD_SHA: headSha,
+      MODE: "all",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      CODEX_PREPARE_RESULT: "success",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "0",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "false",
+      CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      CODEX_BINARY_COVERAGE_CLOSED: "false",
+      CODEX_BINARY_COVERAGE_SUMMARY: "Для текущего binary manifest нет disposition.",
+      CLAUDE_BINARY_COVERAGE_CLOSED: "false",
+      CLAUDE_BINARY_COVERAGE_SUMMARY: "Для текущего binary manifest нет disposition.",
+      REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
+    },
+  });
+
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.ghLog, /C42\.1/u);
+  assert.match(finish.ghLog, /--raw-field state=failure/u);
+  assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
+});
+
 test("старое ревью без доверенных метрик запускает модель повторно", () => {
   const baseSha = "a".repeat(40);
   const headSha = "b".repeat(40);
@@ -1196,7 +1311,7 @@ test("старое ревью без доверенных метрик запу�
       {
         id: 301,
         user: { login: "github-actions[bot]" },
-        body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
+        body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n${binaryCoverageMarker()}`,
       },
     ]]),
   };
@@ -1206,7 +1321,7 @@ test("старое ревью без доверенных метрик запу�
     commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
     env: commonEnv,
   });
-  assert.equal(codex.status, 0, codex.stderr);
+  assert.equal(codex.status, 0, JSON.stringify({ stderr: codex.stderr, stdout: codex.stdout, outputs: codex.outputs }));
   assert.match(codex.outputs, /^needed=true$/mu);
   assert.match(codex.stdout, /не содержит доверенных метрик/u);
 });
@@ -1250,7 +1365,7 @@ test("повторяющиеся и небезопасные метрики не
             {
               id: 302,
               user: { login: "github-actions[bot]" },
-              body: `${marker}\n${metrics}`,
+              body: `${marker}\n${metrics}\n${binaryCoverageMarker()}`,
             },
           ]]),
         },
@@ -1283,12 +1398,12 @@ test("из нескольких ручных ревью одного SHA gate б
         {
           id: 401,
           user: { login: "github-actions[bot]" },
-          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=1;P2=0 -->`,
+          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=1;P2=0 -->\n${binaryCoverageMarker()}`,
         },
         {
           id: 402,
           user: { login: "github-actions[bot]" },
-          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+          body: `${codexMarker}\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
         },
       ]]),
     },
@@ -1311,12 +1426,12 @@ test("[12] любой один маркер запускает только от
   const headSha = "b".repeat(40);
   const cases = [
     {
-      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+      marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
       codexNeeded: "false",
       claudeNeeded: "true",
     },
     {
-      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->`,
+      marker: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
       codexNeeded: "true",
       claudeNeeded: "false",
     },

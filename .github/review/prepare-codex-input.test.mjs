@@ -151,7 +151,7 @@ test("бинарный payload заменяется точным детерми�
   assert.doesNotMatch(diffText, /GIT binary patch|^literal [0-9]+$/mu);
   assert.match(diffText, /-export const answer = 41;/u);
   assert.match(diffText, /\+export const answer = 42;/u);
-  assert.match(diffText, /Binary files/u);
+  assert.match(diffText, /Binary or non-representable content omitted/u);
   const publisherAnchors = collectDiffAnchors(diffText);
   assert.equal(publisherAnchors.get("src/main.js")?.LEFT.has(1), true);
   assert.equal(publisherAnchors.get("src/main.js")?.RIGHT.has(1), true);
@@ -161,6 +161,11 @@ test("бинарный payload заменяется точным детерми�
   assert.equal(manifest.mergeBaseSha, mergeBaseSha);
   assert.equal(manifest.headSha, headSha);
   assert.equal(manifest.files.length, 4);
+  assert.match(manifest.binaryManifestSha256, /^[0-9a-f]{64}$/u);
+  assert.equal(
+    manifest.binaryManifestSha256,
+    createHash("sha256").update(JSON.stringify(manifest.files)).digest("hex"),
+  );
 
   const added = manifest.files.find(
     (file) => file.newPath === "assets/шрифт с пробелом.woff2",
@@ -242,4 +247,176 @@ test("утилита отклоняет неизвестные аргумент�
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Неизвестный аргумент/u);
+});
+
+test("gitlink не читается как blob и не попадает в binary manifest", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "prepare-codex-gitlink-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  git(repository, "init", "--quiet", "--initial-branch=main");
+  write(repository, "README.md", "base\n");
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Первый commit");
+  const firstTarget = git(repository, "rev-parse", "HEAD");
+  const tree = git(repository, "rev-parse", "HEAD^{tree}");
+  const secondTarget = run(
+    "git",
+    ["commit-tree", tree, "-p", firstTarget, "-m", "Второй объект commit"],
+    { cwd: repository },
+  ).stdout.trim();
+
+  git(repository, "update-index", "--add", "--cacheinfo", `160000,${firstTarget},vendor/dependency`);
+  git(repository, "commit", "--quiet", "-m", "Добавить gitlink");
+  const mergeBaseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "--quiet", "--create", "feature");
+  git(repository, "update-index", "--cacheinfo", `160000,${secondTarget},vendor/dependency`);
+  git(repository, "commit", "--quiet", "-m", "Обновить gitlink");
+  const headSha = git(repository, "rev-parse", "HEAD");
+
+  const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
+  const manifest = JSON.parse(prepared.manifest);
+  assert.equal(manifest.files.length, 0);
+  assert.match(prepared.diff.toString("utf8"), /Subproject commit/u);
+});
+
+test("NUL после первых 8 KiB всё равно исключает payload", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "prepare-codex-late-nul-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  git(repository, "init", "--quiet", "--initial-branch=main");
+  const textPrefix = "text-line: value;\n".repeat(600);
+  write(repository, "payload.dat", textPrefix);
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Текстовая база");
+  const mergeBaseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "--quiet", "--create", "feature");
+  const payload = Buffer.concat([
+    Buffer.from(textPrefix),
+    Buffer.from([0]),
+    Buffer.from("secret-binary-tail\n"),
+  ]);
+  write(repository, "payload.dat", payload);
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Поздний NUL");
+  const headSha = git(repository, "rev-parse", "HEAD");
+
+  const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
+  const diff = prepared.diff.toString("utf8");
+  const manifest = JSON.parse(prepared.manifest);
+  assert.equal(manifest.files.length, 1);
+  assert.equal(prepared.diff.includes(0), false);
+  assert.doesNotMatch(diff, /secret-binary-tail/u);
+  assert.match(diff, /^-text-line: value;$/mu);
+  assert.match(diff, /Binary counterpart omitted/u);
+});
+
+test("binary-to-text сохраняет только новую текстовую сторону", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "prepare-codex-transition-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  git(repository, "init", "--quiet", "--initial-branch=main");
+  write(repository, "transition.dat", Buffer.from([0, 1, 2, 3]));
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Бинарная база");
+  const mergeBaseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "--quiet", "--create", "feature");
+  write(repository, "transition.dat", "первая строка\nвторая строка\n");
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Текстовая версия");
+  const headSha = git(repository, "rev-parse", "HEAD");
+
+  const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
+  const diff = prepared.diff.toString("utf8");
+  assert.match(diff, /\+первая строка/u);
+  assert.match(diff, /\+вторая строка/u);
+  assert.equal(prepared.diff.includes(0), false);
+  assert.equal(JSON.parse(prepared.manifest).files.length, 1);
+});
+
+test("не-UTF-8 путь кодируется lossless и его содержимое не передаётся модели", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "prepare-codex-path-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  git(repository, "init", "--quiet", "--initial-branch=main");
+  write(repository, "README.md", "base\n");
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "База");
+  const mergeBaseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "--quiet", "--create", "feature");
+  const relativePath = Buffer.from([0x62, 0x61, 0x64, 0xff, 0x2e, 0x74, 0x78, 0x74]);
+  const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd: repository,
+    input: Buffer.from("lossless-path-content\n"),
+    encoding: "utf8",
+  });
+  assert.equal(blob.status, 0, blob.stderr);
+  const indexEntry = Buffer.concat([
+    Buffer.from(`100644 blob ${blob.stdout.trim()}\t`),
+    relativePath,
+    Buffer.from([0]),
+  ]);
+  const update = spawnSync("git", ["update-index", "-z", "--index-info"], {
+    cwd: repository,
+    input: indexEntry,
+    encoding: null,
+  });
+  assert.equal(update.status, 0, update.stderr.toString("utf8"));
+  git(repository, "commit", "--quiet", "-m", "Путь Git в байтах");
+  const headSha = git(repository, "rev-parse", "HEAD");
+
+  const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
+  const diff = prepared.diff.toString("utf8");
+  const file = JSON.parse(prepared.manifest).files[0];
+  assert.equal(file.newPathEncoding, "hex");
+  assert.equal(file.newPathBytesHex, relativePath.toString("hex"));
+  assert.equal(JSON.stringify(file).includes(relativePath.toString("base64")), false);
+  assert.match(file.newPath, /^git-bytes:/u);
+  assert.doesNotMatch(diff, /lossless-path-content/u);
+});
+
+test("base64, base85 и ASCII-содержимое binary-типа не попадают во вход", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "prepare-codex-encoded-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  git(repository, "init", "--quiet", "--initial-branch=main");
+  write(repository, "encoded.txt", "до кодирования\n");
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "База");
+  const mergeBaseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "--quiet", "--create", "feature");
+  const base64Payload = Buffer.alloc(4_096, "binary payload").toString("base64");
+  write(
+    repository,
+    "encoded.txt",
+    `${"ordinary text before payload\n".repeat(300)}data:application/octet-stream;base64,` +
+      `${base64Payload.match(/.{1,76}/gu).join("\n")}\nordinary text after payload\n`,
+  );
+  write(repository, "encoded85.txt", `<~${"!!!!!".repeat(300)}~>\n`);
+  write(repository, "encoded-z85.txt", `${"^!/*?&[]{}@%$#".repeat(100)}\n`);
+  write(repository, "manual.pdf", "%PDF-1.7\nASCII-only fixture that must remain opaque.\n");
+  write(repository, "danger<marker>.pdf", "%PDF-1.7\nuntrusted path fixture\n");
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Кодированный payload");
+  const headSha = git(repository, "rev-parse", "HEAD");
+
+  const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
+  const diff = prepared.diff.toString("utf8");
+  const manifest = JSON.parse(prepared.manifest);
+  assert.equal(manifest.files.length, 5);
+  assert.equal(manifest.files.find((file) => file.newPath === "encoded.txt").reason, "base64-content");
+  assert.equal(manifest.files.find((file) => file.newPath === "encoded85.txt").reason, "base85-content");
+  assert.equal(manifest.files.find((file) => file.newPath === "encoded-z85.txt").reason, "base85-content");
+  assert.equal(manifest.files.find((file) => file.newPath === "manual.pdf").reason, "binary-extension");
+  assert.match(manifest.files.find((file) => file.newPath?.startsWith("git-bytes:")).newPath, /^git-bytes:/u);
+  assert.doesNotMatch(diff, new RegExp(base64Payload.slice(0, 100), "u"));
+  assert.doesNotMatch(diff, /!!!!!/u);
+  assert.doesNotMatch(diff, /\^!\/\*\?/u);
+  assert.doesNotMatch(diff, /ASCII-only fixture/u);
+  assert.doesNotMatch(diff, /danger<marker>/u);
+  assert.match(diff, /-до кодирования/u);
 });

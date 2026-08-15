@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import test from "node:test";
 
 import {
   buildReviewPayload,
+  buildBinaryCoverageSection,
   buildStaleReviewBody,
   collectDiffAnchors,
   collectDiffLines,
@@ -14,6 +16,8 @@ import {
   reviewNeeded,
   reviewMarker,
   trustedReviewBlockingFindings,
+  trustedBinaryCoverage,
+  validateBinaryManifest,
   validateFindingAnchors,
   validateReviewJson,
 } from "./publish-claude-review.mjs";
@@ -26,6 +30,21 @@ const SPARK_MODEL = "gpt-5.3-codex-spark";
 
 function findingsMarker({ p0 = 0, p1 = 0, p2 = 0 } = {}) {
   return `<!-- review-findings:P0=${p0};P1=${p1};P2=${p2} -->`;
+}
+
+function binaryManifest(files = []) {
+  return {
+    schemaVersion: 1,
+    baseSha: BASE_SHA,
+    mergeBaseSha: BASE_SHA,
+    headSha: HEAD_SHA,
+    binaryManifestSha256: createHash("sha256").update(JSON.stringify(files)).digest("hex"),
+    files,
+  };
+}
+
+function binaryCoverageMarker(manifest = binaryManifest()) {
+  return `<!-- review-binary-coverage:sha256=${manifest.binaryManifestSha256};files=${manifest.files.length} -->`;
 }
 
 function fileDiff({ oldPath = "src/example.ts", newPath = "src/example.ts", hunk }) {
@@ -53,6 +72,7 @@ async function runMainWithFetch(fetchImplementation, environmentOverrides = {}) 
     GH_TOKEN: "test-token-without-production-access",
     REVIEW_MODEL: STANDARD_MODEL,
     REVIEW_JSON: JSON.stringify({ findings: [] }),
+    BINARY_MANIFEST_JSON: JSON.stringify(binaryManifest()),
     ...environmentOverrides,
   };
   const previousEnvironment = new Map(
@@ -282,6 +302,42 @@ test("создаёт одно review с итогом и inline comments", () => 
       body: "[P1] Проверка пропускает ошибку\n\nПри отрицательном значении запрос завершается с неверным результатом.",
     },
   ]);
+});
+
+test("публикует точную границу binary coverage и доверяет только связанному marker", () => {
+  const files = [
+    { oldPath: null, newPath: "assets/font.woff2" },
+    { oldPath: "docs/old.pdf", newPath: null },
+  ];
+  const manifest = validateBinaryManifest(binaryManifest(files), BASE_SHA, HEAD_SHA);
+  const payload = buildReviewPayload(
+    { findings: [] },
+    BASE_SHA,
+    HEAD_SHA,
+    STANDARD_MODEL,
+    { binaryManifest: manifest },
+  );
+
+  assert.match(payload.body, /Непроверенных бинарных файлов: \*\*2\*\*/u);
+  assert.match(payload.body, /`assets\/font\.woff2`/u);
+  assert.match(payload.body, /`docs\/old\.pdf`/u);
+  assert.match(payload.body, /Содержимое перечисленных файлов моделью не проверялось/u);
+  assert.equal(trustedBinaryCoverage({ body: payload.body }, manifest), true);
+  assert.equal(
+    trustedBinaryCoverage(
+      { body: payload.body.replace(manifest.binaryManifestSha256, "0".repeat(64)) },
+      manifest,
+    ),
+    false,
+  );
+  assert.deepEqual(
+    buildBinaryCoverageSection(validateBinaryManifest(binaryManifest(), BASE_SHA, HEAD_SHA)).slice(-1),
+    ["Непроверенных бинарных файлов нет."],
+  );
+  assert.throws(
+    () => validateBinaryManifest(binaryManifest([{ oldPath: null, newPath: "danger`marker.pdf" }]), BASE_SHA, HEAD_SHA),
+    /допустимый path/u,
+  );
 });
 
 test("создаёт итог без inline comments при пустом результате", () => {
@@ -561,7 +617,7 @@ test("не публикует повторное ревью того же diff",
       {
         user: { login: "github-actions[bot]" },
         id: 20,
-        body: `${marker}\n${findingsMarker({ p1: 1 })}`,
+        body: `${marker}\n${findingsMarker({ p1: 1 })}\n${binaryCoverageMarker()}`,
         html_url: "https://github.com/example/sawabook/pull/55#existing-review",
       },
     ]);
