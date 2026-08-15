@@ -208,6 +208,26 @@ case "$*" in
 esac
 `;
 
+const codexInputNodeMock = `#!/usr/bin/env bash
+set -euo pipefail
+shift
+diff_path=''
+manifest_path=''
+while (( $# > 0 )); do
+  case "$1" in
+    --base-sha|--merge-base-sha|--head-sha) shift 2 ;;
+    --diff-path) diff_path="$2"; shift 2 ;;
+    --manifest-path) manifest_path="$2"; shift 2 ;;
+    *) echo "unexpected node argument: $1" >&2; exit 64 ;;
+  esac
+done
+mkdir -p "$(dirname "\${diff_path}")" "$(dirname "\${manifest_path}")"
+printf '%s\n' 'diff --git a/file.txt b/file.txt' > "\${diff_path}"
+printf '%s\n' '{"schemaVersion":1,"files":[]}' > "\${manifest_path}"
+printf '{"diffBytes":%s,"manifestBytes":%s,"binaryFiles":0}\n' \
+  "$(wc -c < "\${diff_path}")" "$(wc -c < "\${manifest_path}")"
+`;
+
 function contextEnv(overrides = {}) {
   return {
     CALLER_REPOSITORY: "Abrikosov-group/project",
@@ -385,13 +405,30 @@ test("все jobs закреплены одновременно за runner grou
   assert.doesNotMatch(workflow, /runs-on: (?:ubuntu|windows|macos)-/u);
 });
 
-test("точный diff строится от доказанного merge base", () => {
+test("безопасный вход Codex строится от доказанного merge base", () => {
+  const prepareJob = extractJob(workflow, "prepare-codex");
   assert.match(workflow, /git fetch --no-tags --no-recurse-submodules/u);
   assert.match(workflow, /origin "refs\/pull\/\$\{PR_NUMBER\}\/head"/u);
   assert.match(workflow, /merge_base="\$\(git merge-base "\$\{BASE_SHA\}" "\$\{HEAD_SHA\}"\)"/u);
   assert.match(workflow, /git merge-base --is-ancestor/u);
-  assert.match(workflow, /git diff --binary --find-renames --full-index/u);
+  assert.match(workflow, /prepare-codex-input\.mjs/u);
+  assert.match(workflow, /--base-sha "\$\{BASE_SHA\}"/u);
+  assert.match(workflow, /--merge-base-sha "\$\{merge_base\}"/u);
+  assert.match(workflow, /--head-sha "\$\{HEAD_SHA\}"/u);
+  assert.match(
+    prepareJob,
+    /repository: \$\{\{ job\.workflow_repository \}\}\n\s+ref: \$\{\{ job\.workflow_sha \}\}\n\s+path: _review_infra/u,
+  );
+  assert.match(
+    workflow,
+    /git diff --no-ext-diff --no-textconv --no-color --find-renames --full-index/u,
+  );
+  assert.doesNotMatch(workflow, /git diff --binary/u);
   assert.match(workflow, /"\$\{merge_base\}" "\$\{HEAD_SHA\}"/u);
+  assert.match(workflow, /BEGIN UNTRUSTED BINARY MANIFEST/u);
+  assert.match(workflow, /binary-manifest\.json/u);
+  assert.match(workflow, /prompt_size="\$\(wc -c < "\$\{input_dir\}\/prompt\.txt"\)"/u);
+  assert.match(workflow, /if \(\( prompt_size > 524288 \)\)/u);
   assert.doesNotMatch(workflow, /application\/vnd\.github\.diff/u);
 });
 
@@ -950,7 +987,7 @@ test("[11] два существующих маркера не запускаю�
   const codex = executeRunScript({
     stepName: "Проверить дубликат и подготовить вход модели",
     ghMock: markerGhMock,
-    commandMocks: { git: gitHeadMock },
+    commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
     env: commonEnv,
   });
   const claude = executeRunScript({
@@ -1031,7 +1068,7 @@ test("повторно использованное ревью с P0–P2 не �
   const codex = executeRunScript({
     stepName: "Проверить дубликат и подготовить вход модели",
     ghMock: markerGhMock,
-    commandMocks: { git: gitHeadMock },
+    commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
     env: commonEnv,
   });
   const claude = executeRunScript({
@@ -1128,7 +1165,7 @@ test("старое ревью без доверенных метрик запу�
   const codex = executeRunScript({
     stepName: "Проверить дубликат и подготовить вход модели",
     ghMock: markerGhMock,
-    commandMocks: { git: gitHeadMock },
+    commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
     env: commonEnv,
   });
   assert.equal(codex.status, 0, codex.stderr);
@@ -1143,7 +1180,7 @@ test("повторяющиеся и небезопасные метрики не
     {
       stepName: "Проверить дубликат и подготовить вход модели",
       marker: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->`,
-      commandMocks: { git: gitHeadMock },
+      commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
     },
     {
       stepName: "Не расходовать квоту повторно для того же снимка",
@@ -1194,7 +1231,7 @@ test("из нескольких ручных ревью одного SHA gate б
   const codex = executeRunScript({
     stepName: "Проверить дубликат и подготовить вход модели",
     ghMock: markerGhMock,
-    commandMocks: { git: gitHeadMock },
+    commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
     env: {
       REPOSITORY: "Abrikosov-group/project",
       PR_NUMBER: "17",
@@ -1264,7 +1301,7 @@ test("[12] любой один маркер запускает только от
     const codex = executeRunScript({
       stepName: "Проверить дубликат и подготовить вход модели",
       ghMock: markerGhMock,
-      commandMocks: { git: gitHeadMock },
+      commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
       env: commonEnv,
     });
     const claude = executeRunScript({
