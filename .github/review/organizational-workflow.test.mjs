@@ -415,6 +415,31 @@ test("исполняемый организационный код закреп�
   assert.equal(organizationCaller.split(reviewedWorkflowReference).length - 1, 2);
 });
 
+test("центральный caller передаёт полный контракт доверенных runner", () => {
+  const reviewedWorkflowReference =
+    `uses: Abrikosov-group/.github/.github/workflows/review-all.yml@${reviewedWorkflowSha}`;
+  const expectedInputs = [
+    "automatic_base_refs: main",
+    'manual_base_refs: "*"',
+    "review_runner_group: sawabook-review",
+    "orchestration_runner_label: sawabook-review-orchestration",
+    "codex_runner_label: sawabook-review-codex",
+    "claude_runner_label: sawabook-review-claude",
+    "expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215",
+    "expected_codex_runner_name: sawabook-review-codex-179-198-117-215",
+    "expected_claude_runner_name: sawabook-review-claude-179-198-117-215",
+    "reuse_existing_reviews: true",
+  ];
+
+  for (const jobId of ["manual-review", "automatic-review"]) {
+    const job = extractJob(organizationCaller, jobId);
+    assert.ok(job.includes(reviewedWorkflowReference), `${jobId}: неверный reusable workflow`);
+    for (const input of expectedInputs) {
+      assert.ok(job.includes(`      ${input}`), `${jobId}: отсутствует ${input}`);
+    }
+  }
+});
+
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
   const codexJob = workflow.match(/\n  analyze-codex:[\s\S]*?(?=\n  publish-codex:)/u)?.[0];
 
