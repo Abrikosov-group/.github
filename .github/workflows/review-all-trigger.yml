@@ -11,6 +11,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  statuses: write
 
 jobs:
   acknowledge-manual:
@@ -138,6 +139,16 @@ jobs:
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
+      automatic_base_refs: main
+      manual_base_refs: "*"
+      review_runner_group: sawabook-review
+      orchestration_runner_label: sawabook-review-orchestration
+      codex_runner_label: sawabook-review-codex
+      claude_runner_label: sawabook-review-claude
+      expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
+      expected_codex_runner_name: sawabook-review-codex-179-198-117-215
+      expected_claude_runner_name: sawabook-review-claude-179-198-117-215
+      reuse_existing_reviews: true
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
@@ -234,5 +245,15 @@ jobs:
       repository: ${{ github.repository }}
       pr_number: ${{ github.event.pull_request.number }}
       expected_head_sha: ${{ github.event.pull_request.head.sha }}
+      automatic_base_refs: main
+      manual_base_refs: "*"
+      review_runner_group: sawabook-review
+      orchestration_runner_label: sawabook-review-orchestration
+      codex_runner_label: sawabook-review-codex
+      claude_runner_label: sawabook-review-claude
+      expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
+      expected_codex_runner_name: sawabook-review-codex-179-198-117-215
+      expected_claude_runner_name: sawabook-review-claude-179-198-117-215
+      reuse_existing_reviews: true
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
