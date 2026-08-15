@@ -485,7 +485,7 @@ jobs:
 
           if [[ "${MODE}" == "all" ]]; then
             heading='### 🚀 Двойное ИИ-ревью запущено'
-            reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+            reviewers="- ⏳ Codex (модель выбирается по размеру, \`xhigh\`) — запущен
           - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
           else
@@ -548,7 +548,7 @@ jobs:
           fi
 
   prepare-codex:
-    name: Подготовить точный diff для Codex Spark
+    name: Подготовить точный diff и выбрать модель Codex
     needs: [context, start-status]
     if: needs.context.outputs.mode == 'all'
     runs-on:
@@ -561,6 +561,7 @@ jobs:
     outputs:
       review_needed: ${{ steps.input.outputs.needed }}
       blocking_findings: ${{ steps.input.outputs.blocking_findings }}
+      review_model: ${{ steps.input.outputs.review_model }}
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ inputs.repository }}
@@ -609,41 +610,6 @@ jobs:
             exit 1
           fi
 
-          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
-            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
-            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
-            existing="$(jq -c \
-              --arg marker "${marker}" \
-              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
-              '[.[][]? | select(
-                .user.login == $login and
-                ((.body // "") | contains($marker))
-              )] | sort_by(.id) | last // null' \
-              <<< "${reviews}")"
-            if [[ "${existing}" != "null" ]]; then
-              if blocking_findings="$(jq -er '
-                [
-                  (.body // "") |
-                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
-                ] as $matches |
-                select(($matches | length) == 1) |
-                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
-                [$counts.p0, $counts.p1, $counts.p2] |
-                map(tonumber) |
-                select(all(.[]; . <= 9007199254740991)) |
-                add |
-                select(. <= 9007199254740991)
-              ' <<< "${existing}")"; then
-                echo "needed=false" >> "${GITHUB_OUTPUT}"
-                echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
-                echo "Актуальное ревью Codex Spark уже существует"
-                exit 0
-              fi
-              echo "::notice::Существующее ревью Codex не содержит доверенных метрик; модель будет запущена повторно"
-            fi
-          fi
-          echo "needed=true" >> "${GITHUB_OUTPUT}"
-
           gh auth setup-git
           git fetch --no-tags --no-recurse-submodules \
             origin "refs/pull/${PR_NUMBER}/head"
@@ -665,11 +631,7 @@ jobs:
           git diff --binary --find-renames --full-index \
             "${merge_base}" "${HEAD_SHA}" -- \
             > "${input_dir}/pull-request.diff"
-          diff_size="$(wc -c < "${input_dir}/pull-request.diff")"
-          if (( diff_size > 524288 )); then
-            echo "::error::Diff для Codex больше 512 KiB; разделите PR для полного ревью"
-            exit 1
-          fi
+          diff_size="$(wc -c < "${input_dir}/pull-request.diff" | tr -d '[:space:]')"
 
           jq -n '{
             type: "object",
@@ -724,6 +686,57 @@ jobs:
             exit 1
           fi
 
+          prompt_size="$(wc -c < "${input_dir}/prompt.txt" | tr -d '[:space:]')"
+          schema_size="$(wc -c < "${input_dir}/review.schema.json" | tr -d '[:space:]')"
+          visible_input_size=$((prompt_size + schema_size))
+          if (( diff_size <= 524288 )); then
+            review_model='gpt-5.3-codex-spark'
+            review_model_name='GPT-5.3-Codex-Spark'
+          elif (( visible_input_size <= 672883 )); then
+            review_model='gpt-5.6-sol'
+            review_model_name='GPT-5.6 Sol'
+          else
+            echo "::error::Видимый вход Codex равен ${visible_input_size} байт (diff ${diff_size} байт) и превышает проверенную границу полного контекста 672883 байт; разделите PR"
+            exit 1
+          fi
+          echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
+          echo "Выбрана ${review_model_name}: diff ${diff_size} байт, видимый вход ${visible_input_size} байт"
+
+          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
+            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:${review_model} -->"
+            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
+            existing="$(jq -c \
+              --arg marker "${marker}" \
+              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
+              '[.[][]? | select(
+                .user.login == $login and
+                ((.body // "") | contains($marker))
+              )] | sort_by(.id) | last // null' \
+              <<< "${reviews}")"
+            if [[ "${existing}" != "null" ]]; then
+              if blocking_findings="$(jq -er '
+                [
+                  (.body // "") |
+                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
+                ] as $matches |
+                select(($matches | length) == 1) |
+                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
+                [$counts.p0, $counts.p1, $counts.p2] |
+                map(tonumber) |
+                select(all(.[]; . <= 9007199254740991)) |
+                add |
+                select(. <= 9007199254740991)
+              ' <<< "${existing}")"; then
+                echo "needed=false" >> "${GITHUB_OUTPUT}"
+                echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
+                echo "Актуальное ревью ${review_model_name} уже существует"
+                exit 0
+              fi
+              echo "::notice::Существующее ревью Codex не содержит доверенных метрик; модель будет запущена повторно"
+            fi
+          fi
+          echo "needed=true" >> "${GITHUB_OUTPUT}"
+
       - name: Передать обезличенный diff на защищённый Runner
         if: steps.input.outputs.needed == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -734,7 +747,7 @@ jobs:
           retention-days: 1
 
   analyze-codex:
-    name: Проанализировать PR с GPT-5.3-Codex-Spark
+    name: Проанализировать PR с выбранной моделью Codex
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
@@ -769,10 +782,11 @@ jobs:
           codex --version
           codex login status
 
-      - name: Выполнить изолированное ревью Spark без инструментов
+      - name: Выполнить изолированное ревью Codex без инструментов
         shell: bash
         env:
           REVIEW_ROOT: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
         run: |
           set -euo pipefail
 
@@ -782,12 +796,20 @@ jobs:
           prompt_path="${input_dir}/prompt.txt"
           schema_path="${input_dir}/review.schema.json"
           result_path="${output_dir}/review.json"
+          log_path="${output_dir}/codex.log"
           codex_bin="$(command -v codex)"
           codex_home="${CODEX_HOME:-${HOME}/.codex}"
 
           test -f "${prompt_path}"
           test -f "${schema_path}"
           test -r "${codex_home}/auth.json"
+          case "${REVIEW_MODEL}" in
+            gpt-5.3-codex-spark|gpt-5.6-sol) ;;
+            *)
+              echo "::error::Подготовительный job передал недопустимую модель Codex"
+              exit 1
+              ;;
+          esac
           mkdir -p "${output_dir}" "${work_dir}"
 
           clean_env=(
@@ -804,8 +826,9 @@ jobs:
             clean_env+=("SSL_CERT_DIR=${SSL_CERT_DIR}")
           fi
 
+          set +e
           env -i "${clean_env[@]}" "${codex_bin}" exec \
-            --model gpt-5.3-codex-spark \
+            --model "${REVIEW_MODEL}" \
             -c 'model_reasoning_effort="xhigh"' \
             -c 'web_search="disabled"' \
             --sandbox read-only \
@@ -825,7 +848,18 @@ jobs:
             --cd "${work_dir}" \
             --output-schema "${schema_path}" \
             --output-last-message "${result_path}" \
-            - < "${prompt_path}"
+            - < "${prompt_path}" 2>&1 | tee "${log_path}"
+          codex_status="${PIPESTATUS[0]}"
+          set -e
+
+          if (( codex_status != 0 )); then
+            if grep -Eiq \
+              'context window|context length|too many input tokens|input (is )?too long|maximum context' \
+              "${log_path}"; then
+              echo "::error::C41.2 — вход Codex не поместился в контекст ${REVIEW_MODEL}; разделите PR, полный контекст не был проверен"
+            fi
+            exit "${codex_status}"
+          fi
 
           jq -e '
             type == "object" and
@@ -854,7 +888,7 @@ jobs:
           fi
 
   publish-codex:
-    name: Опубликовать проверенное ревью Codex Spark
+    name: Опубликовать проверенное ревью Codex
     needs: [context, start-status, prepare-codex, analyze-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
@@ -893,7 +927,7 @@ jobs:
           name: codex-review-input
           path: .review-input/codex
 
-      - name: Получить результат Codex Spark
+      - name: Получить результат Codex
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: codex-review-output
@@ -908,7 +942,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Опубликовать атомарное ревью Codex Spark
+      - name: Опубликовать атомарное ревью Codex
         id: publish
         shell: bash
         env:
@@ -916,7 +950,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          REVIEW_MODEL: gpt-5.3-codex-spark
+          REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
           REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/codex/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/codex/pull-request.diff
           FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
@@ -1292,6 +1326,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       CODEX_PREPARE_RESULT: ${{ needs.prepare-codex.result }}
       CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
+      CODEX_REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
       CODEX_PUBLISHED_BLOCKING_FINDINGS: ${{ needs.publish-codex.outputs.blocking_findings }}
@@ -1344,20 +1379,29 @@ jobs:
           fi
 
           codex_ok=false
+          case "${CODEX_REVIEW_MODEL}" in
+            gpt-5.3-codex-spark) codex_model_name='GPT-5.3-Codex-Spark' ;;
+            gpt-5.6-sol) codex_model_name='GPT-5.6 Sol' ;;
+            '') codex_model_name='Codex' ;;
+            *) codex_model_name='Codex (неизвестная модель)' ;;
+          esac
           if [[ "${MODE}" == "claude" ]]; then
             codex_ok=true
             codex_line=""
           elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
+            codex_line="- ❌ ${codex_model_name} (\`xhigh\`) — подготовка завершилась ошибкой"
+          elif [[ "${CODEX_REVIEW_MODEL}" != "gpt-5.3-codex-spark" &&
+                  "${CODEX_REVIEW_MODEL}" != "gpt-5.6-sol" ]]; then
+            codex_line="- ❌ ${codex_model_name} (\`xhigh\`) — подготовка вернула недопустимую модель"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
-            codex_line="- ✅ GPT-5.3-Codex-Spark (\`xhigh\`) — актуальное ревью уже существует"
+            codex_line="- ✅ ${codex_model_name} (\`xhigh\`) — актуальное ревью уже существует"
           elif [[ "${CODEX_ANALYZE_RESULT}" == "success" &&
                   "${CODEX_PUBLISH_RESULT}" == "success" ]]; then
             codex_ok=true
-            codex_line="- ✅ GPT-5.3-Codex-Spark (\`xhigh\`) — ревью опубликовано"
+            codex_line="- ✅ ${codex_model_name} (\`xhigh\`) — ревью опубликовано"
           else
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — анализ или публикация завершились ошибкой"
+            codex_line="- ❌ ${codex_model_name} (\`xhigh\`) — анализ или публикация завершились ошибкой"
           fi
 
           claude_ok=false
