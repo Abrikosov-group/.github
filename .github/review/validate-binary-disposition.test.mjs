@@ -251,3 +251,68 @@ test("disposition на 21-й странице не теряется из-за л
   assert.equal(result.coverageClosed, true);
   assert.equal(result.disposition.commentId, 2_001);
 });
+
+test("ровно 10000 комментариев проверяются до конца", async () => {
+  let commentPageCalls = 0;
+  const fetchImplementation = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/repos/Abrikosov-group/example/pulls/7") {
+      return response({ head: { sha: HEAD_SHA }, user: PR_AUTHOR });
+    }
+    if (parsed.pathname === "/repos/Abrikosov-group/example/issues/7/comments") {
+      commentPageCalls += 1;
+      const page = Number.parseInt(parsed.searchParams.get("page"), 10);
+      return response(page <= 100
+        ? Array.from({ length: 100 }, (_, index) => ({
+            id: (page - 1) * 100 + index + 1,
+            user: { login: "observer", id: 500 },
+            body: "обычный комментарий",
+          }))
+        : []);
+    }
+    return response({ message: `Unexpected ${parsed.pathname}${parsed.search}` }, 500);
+  };
+
+  const result = await evaluateBinaryDisposition({
+    manifest: manifest(),
+    repository: REPOSITORY,
+    pullNumber: 7,
+    token: "test",
+    fetchImplementation,
+  });
+  assert.equal(result.coverageClosed, false);
+  assert.equal(result.code, "C42.1");
+  assert.equal(commentPageCalls, 101);
+});
+
+test("чрезмерная пагинация останавливается отдельной fail-closed ошибкой", async () => {
+  let commentPageCalls = 0;
+  const fetchImplementation = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/repos/Abrikosov-group/example/pulls/7") {
+      return response({ head: { sha: HEAD_SHA }, user: PR_AUTHOR });
+    }
+    if (parsed.pathname === "/repos/Abrikosov-group/example/issues/7/comments") {
+      commentPageCalls += 1;
+      const page = Number.parseInt(parsed.searchParams.get("page"), 10);
+      return response(Array.from({ length: 100 }, (_, index) => ({
+        id: (page - 1) * 100 + index + 1,
+        user: { login: "observer", id: 500 },
+        body: "обычный комментарий",
+      })));
+    }
+    return response({ message: `Unexpected ${parsed.pathname}${parsed.search}` }, 500);
+  };
+
+  await assert.rejects(
+    evaluateBinaryDisposition({
+      manifest: manifest(),
+      repository: REPOSITORY,
+      pullNumber: 7,
+      token: "test",
+      fetchImplementation,
+    }),
+    /больше 10000 комментариев/u,
+  );
+  assert.equal(commentPageCalls, 101);
+});

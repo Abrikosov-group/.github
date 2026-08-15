@@ -18,6 +18,7 @@ const HASH_PATTERN = /^[0-9a-f]{64}$/u;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)$/u;
 const UNSAFE_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>\p{Cf}]/u;
+const MAX_COMMENT_PAGES = 100;
 
 function requireEnvironment(environment, name) {
   const value = environment[name];
@@ -204,7 +205,7 @@ async function verifyAutomatedRuns(record, repository, headSha, token, fetchImpl
 
 async function allComments(fetchImplementation, repository, pullNumber, token) {
   const result = [];
-  for (let page = 1; ; page += 1) {
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page += 1) {
     const comments = await githubRequest(
       fetchImplementation,
       `/repos/${repository}/issues/${pullNumber}/comments?per_page=100&page=${page}`,
@@ -215,6 +216,17 @@ async function allComments(fetchImplementation, repository, pullNumber, token) {
       return result;
     }
   }
+  const overflow = await githubRequest(
+    fetchImplementation,
+    `/repos/${repository}/issues/${pullNumber}/comments?per_page=100&page=${MAX_COMMENT_PAGES + 1}`,
+    token,
+  );
+  if (overflow.length === 0) {
+    return result;
+  }
+  throw new Error(
+    `Независимая проверка disposition остановлена: в PR больше ${MAX_COMMENT_PAGES * 100} комментариев.`,
+  );
 }
 
 export async function evaluateBinaryDisposition({ manifest, repository, pullNumber, token, fetchImplementation }) {

@@ -17,10 +17,7 @@ const MAX_GIT_ERROR_BYTES = 64 * 1024;
 const ENCODED_PAYLOAD_MIN_BYTES = 1_024;
 const UNSAFE_MODEL_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>\p{Cf}]/u;
 const BINARY_EXTENSION_PATTERN = /\.(?:7z|avi|avif|bin|bmp|bz2|class|dll|dmg|docx?|eot|exe|flac|gif|gz|ico|jar|jpe?g|m4a|mkv|mov|mp3|mp4|o|od[fpst]|ogg|otf|pdf|png|pptx?|rar|so|tar|tiff?|ttf|wav|webm|webp|woff2?|xlsx?|xz|zip)$/iu;
-const Z85_ALPHABET = new Set(Buffer.from(
-  "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#",
-  "ascii",
-));
+const BASE85_EXTENSION_PATTERN = /\.(?:a85|ascii85|b85|base85|z85)$/iu;
 
 function usageError(message) {
   throw new Error(
@@ -283,12 +280,6 @@ function inspectObject(oid) {
     let base64MarkedPayload = false;
     let base64MarkedCharacters = 0;
     let base64MarkedPayloadDetected = false;
-    let base85Characters = 0;
-    let base85OtherCharacters = 0;
-    let z85Characters = 0;
-    let z85OtherCharacters = 0;
-    let z85Run = 0;
-    let longestZ85Run = 0;
     let ascii85Open = false;
     let ascii85PendingTilde = false;
     let ascii85Characters = 0;
@@ -350,21 +341,6 @@ function inspectObject(oid) {
         }
 
         const base85Character = byte >= 0x21 && byte <= 0x75;
-        if (base85Character) {
-          base85Characters += 1;
-        } else if (!whitespace) {
-          base85OtherCharacters += 1;
-        }
-        if (Z85_ALPHABET.has(byte)) {
-          z85Characters += 1;
-          z85Run += 1;
-          longestZ85Run = Math.max(longestZ85Run, z85Run);
-        } else {
-          z85Run = 0;
-          if (!whitespace) {
-            z85OtherCharacters += 1;
-          }
-        }
         if (ascii85Open) {
           if (ascii85PendingTilde) {
             if (byte === 0x3e) {
@@ -427,10 +403,7 @@ function inspectObject(oid) {
         )
       );
       const base85Payload = bytes >= ENCODED_PAYLOAD_MIN_BYTES && (
-        ascii85DelimitedPayload ||
-        longestZ85Run >= ENCODED_PAYLOAD_MIN_BYTES ||
-        (base85OtherCharacters === 0 && base85Characters / bytes >= 0.95) ||
-        (z85OtherCharacters === 0 && z85Characters / bytes >= 0.95)
+        ascii85DelimitedPayload
       );
       const encodedPayload = base64Payload || base85Payload;
       resolve({
@@ -509,13 +482,16 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
       .some((path) => path !== null && !path.modelSafe);
     const binaryExtension = [entry.oldPath, entry.newPath]
       .some((path) => path?.pathEncoding === "utf8" && BINARY_EXTENSION_PATTERN.test(path.path));
-    const binary = numstatEntries[index].binary || oldObject?.binary || newObject?.binary || binaryExtension;
+    const base85Extension = [entry.oldPath, entry.newPath]
+      .some((path) => path?.pathEncoding === "utf8" && BASE85_EXTENSION_PATTERN.test(path.path));
+    const opaqueExtension = binaryExtension || base85Extension;
+    const binary = numstatEntries[index].binary || oldObject?.binary || newObject?.binary || opaqueExtension;
     entry.oldObject = oldObject;
     entry.newObject = newObject;
     entry.omitContent = Boolean(binary || unsafePath);
     entry.binaryTransition = Boolean(
       oldObject?.objectType === "blob" && newObject?.objectType === "blob" &&
-      oldObject.binary !== newObject.binary && !unsafePath && !binaryExtension,
+      oldObject.binary !== newObject.binary && !unsafePath && !opaqueExtension,
     );
 
     if (!entry.omitContent) {
@@ -537,13 +513,15 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
       newBlob: newObject?.blob ?? null,
       reason: unsafePath
         ? "opaque-path"
-        : binaryExtension
-          ? "binary-extension"
-          : oldObject?.binaryReason === "base64-content" || newObject?.binaryReason === "base64-content"
-            ? "base64-content"
-            : oldObject?.binaryReason === "base85-content" || newObject?.binaryReason === "base85-content"
-              ? "base85-content"
-            : "binary-content",
+        : base85Extension
+          ? "base85-content"
+          : binaryExtension
+            ? "binary-extension"
+            : oldObject?.binaryReason === "base64-content" || newObject?.binaryReason === "base64-content"
+              ? "base64-content"
+              : oldObject?.binaryReason === "base85-content" || newObject?.binaryReason === "base85-content"
+                ? "base85-content"
+                : "binary-content",
     });
   }
 

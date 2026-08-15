@@ -582,7 +582,7 @@ test("Claude не получает инструменты записи, shell и
 });
 
 test("обе модели получают один формат безопасного diff и публикуют exact binary coverage", () => {
-  assert.equal(workflow.split("prepare-codex-input.mjs").length - 1, 2);
+  assert.equal(workflow.split("prepare-codex-input.mjs").length - 1, 3);
   assert.equal(workflow.split("validate-binary-disposition.mjs").length - 1, 2);
   assert.equal(workflow.split("BINARY_MANIFEST_PATH:").length - 1, 2);
   assert.match(workflow, /review-binary-coverage:sha256=\$\{binary_manifest_sha256\};files=\$\{binary_files\}/u);
@@ -602,6 +602,32 @@ test("публикация Claude не запускается без созда�
     /if: needs\.analyze-claude\.outputs\.review_needed == 'true'/u,
   );
   assert.match(publishJob, /name: claude-review-input/u);
+  assert.ok(
+    analyzeJob.indexOf("Передать безопасный вход издателю") <
+      analyzeJob.indexOf("Выполнить изолированное review-only ревью"),
+  );
+});
+
+test("издатель Claude независимо пересобирает и сверяет exact вход", () => {
+  const publishJob = extractJob(workflow, "publish-claude");
+
+  assert.match(publishJob, /- name: Получить точный Base для независимой проверки/u);
+  assert.match(publishJob, /ref: \$\{\{ needs\.context\.outputs\.base_sha \}\}/u);
+  assert.match(publishJob, /fetch-depth: 0/u);
+  assert.match(publishJob, /path: \.review-input\/claude/u);
+  assert.match(publishJob, /prepare-codex-input\.mjs/u);
+  assert.match(publishJob, /cmp --silent/u);
+  assert.match(publishJob, /Вход Claude \$\{input_name\} не совпадает с независимо пересобранным exact PR/u);
+  assert.match(publishJob, /DIFF_PATH: \$\{\{ github\.workspace \}\}\/\.review-input\/trusted\/pull-request\.diff/u);
+  assert.match(publishJob, /BINARY_MANIFEST_PATH: \$\{\{ github\.workspace \}\}\/\.review-input\/trusted\/binary-manifest\.json/u);
+  assert.ok(
+    publishJob.indexOf("Получить точный Base для независимой проверки") <
+      publishJob.indexOf("Получить вход, который анализировал Claude"),
+  );
+  assert.ok(
+    publishJob.indexOf("Независимо проверить вход Claude") <
+      publishJob.indexOf("Опубликовать атомарное ревью"),
+  );
 });
 
 test("Claude запускается из точного доверенного Base checkout", () => {

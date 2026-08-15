@@ -411,7 +411,9 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
       `${base64Payload.match(/.{1,76}/gu).join("\n")}\nordinary text after payload\n`,
   );
   write(repository, "encoded85.txt", `<~${"!!!!!".repeat(300)}~>\n`);
-  write(repository, "encoded-z85.txt", `${"^!/*?&[]{}@%$#".repeat(100)}\n`);
+  write(repository, "encoded.z85", `${"^!/*?&[]{}@%$#".repeat(100)}\n`);
+  write(repository, "source-ascii85-like.js", `${"consta=true;".repeat(100)}\n`);
+  write(repository, "source-z85-like.js", `${"consta=true:".repeat(100)}\n`);
   write(repository, "manual.pdf", "%PDF-1.7\nASCII-only fixture that must remain opaque.\n");
   write(repository, "danger<marker>.pdf", "%PDF-1.7\nuntrusted path fixture\n");
   write(repository, "danger\u200bmarker.pdf", "%PDF-1.7\nhidden unicode path fixture\n");
@@ -425,7 +427,9 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   assert.equal(manifest.files.length, 6);
   assert.equal(manifest.files.find((file) => file.newPath === "encoded.txt").reason, "base64-content");
   assert.equal(manifest.files.find((file) => file.newPath === "encoded85.txt").reason, "base85-content");
-  assert.equal(manifest.files.find((file) => file.newPath === "encoded-z85.txt").reason, "base85-content");
+  assert.equal(manifest.files.find((file) => file.newPath === "encoded.z85").reason, "base85-content");
+  assert.equal(manifest.files.some((file) => file.newPath === "source-ascii85-like.js"), false);
+  assert.equal(manifest.files.some((file) => file.newPath === "source-z85-like.js"), false);
   assert.equal(manifest.files.find((file) => file.newPath === "manual.pdf").reason, "binary-extension");
   const encodedPaths = manifest.files.filter((file) => file.newPath?.startsWith("git-bytes:"));
   assert.equal(encodedPaths.length, 2);
@@ -434,6 +438,8 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   assert.doesNotMatch(diff, new RegExp(base64Payload.slice(0, 100), "u"));
   assert.doesNotMatch(diff, /!!!!!/u);
   assert.doesNotMatch(diff, /\^!\/\*\?/u);
+  assert.match(diff, /consta=true;/u);
+  assert.match(diff, /consta=true:/u);
   assert.doesNotMatch(diff, /ASCII-only fixture/u);
   assert.doesNotMatch(diff, /danger<marker>/u);
   assert.doesNotMatch(diff, /danger\u200bmarker/u);
