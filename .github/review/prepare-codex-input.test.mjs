@@ -65,6 +65,12 @@ function deterministicBinary(size, seed) {
   return result;
 }
 
+function deterministicWoff2(size, seed) {
+  const result = deterministicBinary(size, seed);
+  Buffer.from("wOF2", "ascii").copy(result, 0);
+  return result;
+}
+
 function prepare(repository, baseSha, mergeBaseSha, headSha, directory) {
   const diffPath = join(directory, "pull-request.diff");
   const manifestPath = join(directory, "binary-manifest.json");
@@ -99,7 +105,7 @@ test("бинарный payload заменяется точным детерми�
   mkdirSync(repository);
   git(repository, "init", "--quiet", "--initial-branch=main");
 
-  write(repository, "src/main.js", "export const answer = 41;\n");
+  write(repository, "src/layout.tsx", "export const answer = 41;\n");
   write(repository, "assets/rename-old.bin", deterministicBinary(4096, "rename"));
   write(repository, "assets/delete.bin", deterministicBinary(3072, "delete"));
   write(repository, "assets/change.bin", deterministicBinary(2048, "change-before"));
@@ -108,9 +114,28 @@ test("бинарный payload заменяется точным детерми�
   const mergeBaseSha = git(repository, "rev-parse", "HEAD");
   git(repository, "switch", "--quiet", "--create", "feature");
 
-  write(repository, "src/main.js", "export const answer = 42;\n");
-  const addedBinary = deterministicBinary(335_264, "large-font-fixture");
-  write(repository, "assets/шрифт с пробелом.woff2", addedBinary);
+  write(repository, "src/layout.tsx", "export const answer = 42;\n");
+  const fonts = [
+    { path: "assets/fonts/manrope/Manrope.woff2", bytes: deterministicWoff2(110_000, "manrope") },
+    { path: "assets/fonts/oswald/Oswald.woff2", bytes: deterministicWoff2(115_000, "oswald") },
+    { path: "assets/fonts/cormorant/Cormorant.woff2", bytes: deterministicWoff2(120_264, "cormorant") },
+  ];
+  for (const font of fonts) {
+    write(repository, font.path, font.bytes);
+    write(repository, `${dirname(font.path)}/OFL.txt`, "SIL Open Font License 1.1\n");
+  }
+  write(
+    repository,
+    "assets/fonts/README.md",
+    [
+      "# Источник локальных шрифтов",
+      "",
+      "Репозиторий: `example/fonts`.",
+      ...fonts.map((font) => `- ${font.path}: ${createHash("sha256").update(font.bytes).digest("hex")}`),
+      "",
+    ].join("\n"),
+  );
+  write(repository, "assets/текст-с-необычным-расширением.avif", "это безопасный текст\n");
   renameSync(
     join(repository, "assets/rename-old.bin"),
     join(repository, "assets/переименован.bin"),
@@ -146,38 +171,46 @@ test("бинарный payload заменяется точным детерми�
 
   assert.equal(first.summary.diffBytes, first.diff.length);
   assert.equal(first.summary.manifestBytes, first.manifest.length);
-  assert.equal(first.summary.binaryFiles, 4);
+  assert.equal(first.summary.binaryFiles, 6);
   assert.ok(first.diff.length < 20_000, "сырой бинарный payload не попал в текстовый diff");
   assert.doesNotMatch(diffText, /GIT binary patch|^literal [0-9]+$/mu);
   assert.match(diffText, /-export const answer = 41;/u);
   assert.match(diffText, /\+export const answer = 42;/u);
   assert.match(diffText, /Binary or non-representable content omitted/u);
   const publisherAnchors = collectDiffAnchors(diffText);
-  assert.equal(publisherAnchors.get("src/main.js")?.LEFT.has(1), true);
-  assert.equal(publisherAnchors.get("src/main.js")?.RIGHT.has(1), true);
+  assert.equal(publisherAnchors.get("src/layout.tsx")?.LEFT.has(1), true);
+  assert.equal(publisherAnchors.get("src/layout.tsx")?.RIGHT.has(1), true);
 
-  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.schemaVersion, 2);
   assert.equal(manifest.baseSha, baseSha);
   assert.equal(manifest.mergeBaseSha, mergeBaseSha);
   assert.equal(manifest.headSha, headSha);
-  assert.equal(manifest.files.length, 4);
+  assert.equal(manifest.files.length, 6);
   assert.match(manifest.binaryManifestSha256, /^[0-9a-f]{64}$/u);
   assert.equal(
     manifest.binaryManifestSha256,
     createHash("sha256").update(JSON.stringify(manifest.files)).digest("hex"),
   );
 
-  const added = manifest.files.find(
-    (file) => file.newPath === "assets/шрифт с пробелом.woff2",
-  );
-  assert.equal(added.status, "A");
-  assert.equal(added.oldBlob, null);
-  assert.equal(added.newBlob.bytes, addedBinary.length);
+  for (const font of fonts) {
+    const added = manifest.files.find((file) => file.newPath === font.path);
+    assert.equal(added.status, "A");
+    assert.equal(added.oldBlob, null);
+    assert.equal(added.newBlob.bytes, font.bytes.length);
+    assert.equal(added.newBlob.format, "font/woff2");
+    assert.equal(added.newBlob.source.path, "assets/fonts/README.md");
+    assert.equal(added.newBlob.license.path, `${dirname(font.path)}/OFL.txt`);
+    assert.equal(added.newBlob.oid, git(repository, "rev-parse", `${headSha}:${font.path}`));
+    assert.equal(added.newBlob.sha256, createHash("sha256").update(font.bytes).digest("hex"));
+    assert.equal(first.diff.includes(font.bytes.subarray(0, 64)), false);
+  }
+  assert.match(diffText, /\+это безопасный текст/u);
+  assert.match(diffText, /\+# Источник локальных шрифтов/u);
+  assert.match(diffText, /\+SIL Open Font License 1\.1/u);
   assert.equal(
-    added.newBlob.oid,
-    git(repository, "rev-parse", `${headSha}:assets/шрифт с пробелом.woff2`),
+    manifest.files.some((file) => file.newPath === "assets/текст-с-необычным-расширением.avif"),
+    false,
   );
-  assert.equal(added.newBlob.sha256, createHash("sha256").update(addedBinary).digest("hex"));
 
   const changed = manifest.files.find((file) => file.newPath === "assets/change.bin");
   assert.equal(changed.status, "M");
@@ -197,6 +230,27 @@ test("бинарный payload заменяется точным детерми�
 
   assert.deepEqual(first.diff, second.diff);
   assert.deepEqual(first.manifest, second.manifest);
+
+  git(repository, "switch", "--quiet", "feature");
+  const changedFont = Buffer.from(fonts[0].bytes);
+  changedFont[changedFont.length - 1] ^= 0xff;
+  write(repository, fonts[0].path, changedFont);
+  write(
+    repository,
+    "assets/fonts/README.md",
+    readFileSync(join(repository, "assets/fonts/README.md"), "utf8").replace(
+      createHash("sha256").update(fonts[0].bytes).digest("hex"),
+      createHash("sha256").update(changedFont).digest("hex"),
+    ),
+  );
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Изменить один байт шрифта");
+  const changedHeadSha = git(repository, "rev-parse", "HEAD");
+  const changedPrepared = prepare(repository, baseSha, mergeBaseSha, changedHeadSha, join(root, "changed"));
+  assert.notEqual(
+    JSON.parse(changedPrepared.manifest).binaryManifestSha256,
+    manifest.binaryManifestSha256,
+  );
 
   const rejected = run(
     process.execPath,
@@ -350,7 +404,7 @@ test("binary-to-text сохраняет только новую текстову
   assert.equal(JSON.parse(prepared.manifest).files.length, 1);
 });
 
-test("не-UTF-8 путь кодируется lossless и его содержимое не передаётся модели", (context) => {
+test("не-UTF-8 путь кодируется lossless, а безопасный текст сохраняется", (context) => {
   const root = mkdtempSync(join(tmpdir(), "prepare-codex-path-"));
   context.after(() => rmSync(root, { recursive: true, force: true }));
   const repository = join(root, "repository");
@@ -384,12 +438,10 @@ test("не-UTF-8 путь кодируется lossless и его содержи
 
   const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
   const diff = prepared.diff.toString("utf8");
-  const file = JSON.parse(prepared.manifest).files[0];
-  assert.equal(file.newPathEncoding, "hex");
-  assert.equal(file.newPathBytesHex, relativePath.toString("hex"));
-  assert.equal(JSON.stringify(file).includes(relativePath.toString("base64")), false);
-  assert.match(file.newPath, /^git-bytes:/u);
-  assert.doesNotMatch(diff, /lossless-path-content/u);
+  assert.equal(JSON.parse(prepared.manifest).files.length, 0);
+  assert.match(diff, new RegExp(`git-bytes:${relativePath.toString("hex")}`, "u"));
+  assert.match(diff, /\+lossless-path-content/u);
+  assert.doesNotMatch(diff, /[\u007f-\u009f]/u);
 });
 
 test("base64, base85 и ASCII-содержимое binary-типа не попадают во вход", (context) => {
@@ -399,6 +451,8 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   mkdirSync(repository);
   git(repository, "init", "--quiet", "--initial-branch=main");
   write(repository, "encoded.txt", "до кодирования\n");
+  write(repository, ".gitattributes", "forced.txt -diff\n");
+  write(repository, "forced.txt", "старый безопасный текст\n");
   git(repository, "add", "--all");
   git(repository, "commit", "--quiet", "-m", "База");
   const mergeBaseSha = git(repository, "rev-parse", "HEAD");
@@ -414,6 +468,7 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   write(repository, "encoded.z85", `${"^!/*?&[]{}@%$#".repeat(100)}\n`);
   write(repository, "source-ascii85-like.js", `${"consta=true;".repeat(100)}\n`);
   write(repository, "source-z85-like.js", `${"consta=true:".repeat(100)}\n`);
+  write(repository, "forced.txt", "новый безопасный текст\n");
   write(repository, "manual.pdf", "%PDF-1.7\nASCII-only fixture that must remain opaque.\n");
   write(repository, "danger<marker>.pdf", "%PDF-1.7\nuntrusted path fixture\n");
   write(repository, "danger\u200bmarker.pdf", "%PDF-1.7\nhidden unicode path fixture\n");
@@ -430,7 +485,7 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   assert.equal(manifest.files.find((file) => file.newPath === "encoded.z85").reason, "base85-content");
   assert.equal(manifest.files.some((file) => file.newPath === "source-ascii85-like.js"), false);
   assert.equal(manifest.files.some((file) => file.newPath === "source-z85-like.js"), false);
-  assert.equal(manifest.files.find((file) => file.newPath === "manual.pdf").reason, "binary-extension");
+  assert.equal(manifest.files.find((file) => file.newPath === "manual.pdf").newBlob.format, "application/pdf");
   const encodedPaths = manifest.files.filter((file) => file.newPath?.startsWith("git-bytes:"));
   assert.equal(encodedPaths.length, 2);
   assert.ok(encodedPaths.every((file) => file.newPathEncoding === "hex"));
@@ -440,6 +495,8 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   assert.doesNotMatch(diff, /\^!\/\*\?/u);
   assert.match(diff, /consta=true;/u);
   assert.match(diff, /consta=true:/u);
+  assert.match(diff, /-старый безопасный текст/u);
+  assert.match(diff, /\+новый безопасный текст/u);
   assert.doesNotMatch(diff, /ASCII-only fixture/u);
   assert.doesNotMatch(diff, /danger<marker>/u);
   assert.doesNotMatch(diff, /danger\u200bmarker/u);

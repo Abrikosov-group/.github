@@ -33,13 +33,41 @@ function findingsMarker({ p0 = 0, p1 = 0, p2 = 0 } = {}) {
 }
 
 function binaryManifest(files = []) {
+  const normalizedFiles = files.map((file, index) => {
+    const blob = {
+      oid: String(index + 3).repeat(40),
+      bytes: 1024 + index,
+      sha256: String(index + 3).repeat(64),
+      format: index === 0 ? "font/woff2" : "application/pdf",
+      source: index === 0
+        ? { path: "assets/README.md", bytes: 120, sha256: "a".repeat(64) }
+        : null,
+      license: index === 0
+        ? { path: "assets/OFL.txt", bytes: 240, sha256: "b".repeat(64) }
+        : null,
+    };
+    return {
+      status: file.oldPath === null ? "A" : file.newPath === null ? "D" : "M",
+      oldPath: file.oldPath,
+      newPath: file.newPath,
+      oldPathEncoding: file.oldPath === null ? null : "utf8",
+      newPathEncoding: file.newPath === null ? null : "utf8",
+      oldPathBytesHex: null,
+      newPathBytesHex: null,
+      oldMode: file.oldPath === null ? null : "100644",
+      newMode: file.newPath === null ? null : "100644",
+      oldBlob: file.oldPath === null ? null : blob,
+      newBlob: file.newPath === null ? null : blob,
+      reason: "binary-content",
+    };
+  });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     baseSha: BASE_SHA,
     mergeBaseSha: BASE_SHA,
     headSha: HEAD_SHA,
-    binaryManifestSha256: createHash("sha256").update(JSON.stringify(files)).digest("hex"),
-    files,
+    binaryManifestSha256: createHash("sha256").update(JSON.stringify(normalizedFiles)).digest("hex"),
+    files: normalizedFiles,
   };
 }
 
@@ -329,7 +357,7 @@ test("создаёт одно review с итогом и inline comments", () => 
   ]);
 });
 
-test("публикует точную границу binary coverage и доверяет только связанному marker", () => {
+test("публикует точную границу бинарного анализа и доверяет только связанному marker", () => {
   const files = [
     { oldPath: null, newPath: "assets/font.woff2" },
     { oldPath: "docs/old.pdf", newPath: null },
@@ -343,10 +371,13 @@ test("публикует точную границу binary coverage и дове
     { binaryManifest: manifest },
   );
 
-  assert.match(payload.body, /Непроверенных бинарных файлов: \*\*2\*\*/u);
+  assert.match(payload.body, /Исключённых бинарных файлов: \*\*2\*\*/u);
   assert.match(payload.body, /`assets\/font\.woff2`/u);
   assert.match(payload.body, /`docs\/old\.pdf`/u);
-  assert.match(payload.body, /Содержимое перечисленных файлов моделью не проверялось/u);
+  assert.match(payload.body, /Их байты моделью не проверялись/u);
+  assert.match(payload.body, /font\/woff2/u);
+  assert.match(payload.body, /источник: `assets\/README\.md`/u);
+  assert.match(payload.body, /лицензия: `assets\/OFL\.txt`/u);
   assert.equal(trustedBinaryCoverage({ body: payload.body }, manifest), true);
   assert.equal(
     trustedBinaryCoverage(
@@ -357,7 +388,7 @@ test("публикует точную границу binary coverage и дове
   );
   assert.deepEqual(
     buildBinaryCoverageSection(validateBinaryManifest(binaryManifest(), BASE_SHA, HEAD_SHA)).slice(-1),
-    ["Непроверенных бинарных файлов нет."],
+    ["Исключённых бинарных файлов нет."],
   );
   assert.throws(
     () => validateBinaryManifest(binaryManifest([{ oldPath: null, newPath: "danger`marker.pdf" }]), BASE_SHA, HEAD_SHA),

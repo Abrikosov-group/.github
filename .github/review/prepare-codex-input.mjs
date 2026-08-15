@@ -5,7 +5,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, posix } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
@@ -16,8 +16,44 @@ const MAX_PATCH_BYTES = 64 * 1024 * 1024;
 const MAX_GIT_ERROR_BYTES = 64 * 1024;
 const ENCODED_PAYLOAD_MIN_BYTES = 1_024;
 const UNSAFE_MODEL_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>\p{Cf}]/u;
-const BINARY_EXTENSION_PATTERN = /\.(?:7z|avi|avif|bin|bmp|bz2|class|dll|dmg|docx?|eot|exe|flac|gif|gz|ico|jar|jpe?g|m4a|mkv|mov|mp3|mp4|o|od[fpst]|ogg|otf|pdf|png|pptx?|rar|so|tar|tiff?|ttf|wav|webm|webp|woff2?|xlsx?|xz|zip)$/iu;
 const BASE85_EXTENSION_PATTERN = /\.(?:a85|ascii85|b85|base85|z85)$/iu;
+const SOURCE_DECLARATION_NAMES = ["PROVENANCE.md", "SOURCES.md", "SOURCE.md", "README.md", "README"];
+const LICENSE_DECLARATION_NAMES = ["OFL.txt", "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "NOTICE"];
+const MAX_DECLARATION_BYTES = 1024 * 1024;
+const Z85_ALPHABET = new Set(Buffer.from(
+  "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#",
+  "ascii",
+));
+
+function startsWithBytes(value, bytes) {
+  return value.length >= bytes.length && bytes.every((byte, index) => value[index] === byte);
+}
+
+function detectContentFormat(prefix, { validUtf8, containsNul, base64Payload, base85Payload }) {
+  if (startsWithBytes(prefix, [0x77, 0x4f, 0x46, 0x32])) return "font/woff2";
+  if (startsWithBytes(prefix, [0x77, 0x4f, 0x46, 0x46])) return "font/woff";
+  if (startsWithBytes(prefix, [0x4f, 0x54, 0x54, 0x4f])) return "font/otf";
+  if (startsWithBytes(prefix, [0x00, 0x01, 0x00, 0x00])) return "font/ttf";
+  if (startsWithBytes(prefix, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (startsWithBytes(prefix, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (startsWithBytes(prefix, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) ||
+      startsWithBytes(prefix, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61])) return "image/gif";
+  if (startsWithBytes(prefix, [0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf";
+  if (startsWithBytes(prefix, [0x50, 0x4b, 0x03, 0x04]) ||
+      startsWithBytes(prefix, [0x50, 0x4b, 0x05, 0x06]) ||
+      startsWithBytes(prefix, [0x50, 0x4b, 0x07, 0x08])) return "application/zip";
+  if (startsWithBytes(prefix, [0x1f, 0x8b])) return "application/gzip";
+  if (startsWithBytes(prefix, [0x7f, 0x45, 0x4c, 0x46])) return "application/x-elf";
+  if (
+    startsWithBytes(prefix, [0x52, 0x49, 0x46, 0x46]) &&
+    prefix.length >= 12 &&
+    startsWithBytes(prefix.subarray(8), [0x57, 0x45, 0x42, 0x50])
+  ) return "image/webp";
+  if (base64Payload) return "application/base64";
+  if (base85Payload) return "application/ascii85";
+  if (validUtf8 && !containsNul) return "text/plain; charset=utf-8";
+  return "application/octet-stream";
+}
 
 function usageError(message) {
   throw new Error(
@@ -270,6 +306,7 @@ function inspectObject(oid) {
     const hash = createHash("sha256");
     const decoder = new TextDecoder("utf-8", { fatal: true });
     let bytes = 0;
+    let prefix = Buffer.alloc(0);
     let containsNul = false;
     let validUtf8 = true;
     let base64Characters = 0;
@@ -284,6 +321,8 @@ function inspectObject(oid) {
     let ascii85PendingTilde = false;
     let ascii85Characters = 0;
     let ascii85DelimitedPayload = false;
+    let z85Characters = 0;
+    let z85OtherCharacters = 0;
     let previousByte = null;
     let stderr = Buffer.alloc(0);
     const base64Marker = Buffer.from("base64,", "ascii");
@@ -295,6 +334,9 @@ function inspectObject(oid) {
     child.stdout.on("data", (chunk) => {
       bytes += chunk.length;
       hash.update(chunk);
+      if (prefix.length < 16) {
+        prefix = Buffer.concat([prefix, chunk]).subarray(0, 16);
+      }
       containsNul ||= chunk.includes(0);
       for (const byte of chunk) {
         const base64Character =
@@ -303,6 +345,12 @@ function inspectObject(oid) {
           (byte >= 0x30 && byte <= 0x39) ||
           byte === 0x2b || byte === 0x2f || byte === 0x3d;
         const whitespace = byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20;
+        const z85Character = Z85_ALPHABET.has(byte);
+        if (z85Character) {
+          z85Characters += 1;
+        } else if (!whitespace) {
+          z85OtherCharacters += 1;
+        }
         if (base64Character) {
           base64Characters += 1;
           base64Run += 1;
@@ -405,16 +453,29 @@ function inspectObject(oid) {
       const base85Payload = bytes >= ENCODED_PAYLOAD_MIN_BYTES && (
         ascii85DelimitedPayload
       );
+      const z85Payload = bytes >= ENCODED_PAYLOAD_MIN_BYTES &&
+        z85OtherCharacters === 0 && z85Characters / bytes >= 0.95;
       const encodedPayload = base64Payload || base85Payload;
+      const format = detectContentFormat(prefix, {
+        validUtf8,
+        containsNul,
+        base64Payload,
+        base85Payload,
+      });
+      const magicBinary = format !== "text/plain; charset=utf-8" &&
+        format !== "application/base64" && format !== "application/ascii85";
       resolve({
         objectType,
-        binary: containsNul || !validUtf8 || encodedPayload,
+        binary: containsNul || !validUtf8 || encodedPayload || magicBinary,
+        z85Payload,
         binaryReason: base64Payload
           ? "base64-content"
           : base85Payload
             ? "base85-content"
-            : "binary-content",
-        blob: { oid, bytes, sha256: hash.digest("hex") },
+            : magicBinary
+              ? "detected-format"
+              : "binary-content",
+        blob: { oid, bytes, sha256: hash.digest("hex"), format },
       });
     });
   });
@@ -429,6 +490,99 @@ function manifestPath(path) {
     pathEncoding: path.pathEncoding,
     pathBytesHex: path.pathBytesHex,
   };
+}
+
+function listTree(commitSha) {
+  const entries = new Map();
+  for (const token of splitNul(
+    runGitBuffer(["ls-tree", "-r", "-z", "--full-tree", commitSha]),
+    `git ls-tree ${commitSha}`,
+  )) {
+    const tab = token.indexOf(0x09);
+    if (tab < 1) {
+      throw new Error(`Git вернул неожиданный ls-tree для ${commitSha}.`);
+    }
+    const metadata = token.subarray(0, tab).toString("ascii");
+    const match = /^([0-7]{6}) (blob|commit) ([0-9a-f]{40})$/u.exec(metadata);
+    if (!match || match[2] !== "blob") {
+      continue;
+    }
+    const described = describePath(token.subarray(tab + 1));
+    if (described.pathEncoding === "utf8") {
+      entries.set(described.path, { mode: match[1], oid: match[3] });
+    }
+  }
+  return entries;
+}
+
+function ancestorDirectories(filePath) {
+  const directories = [];
+  let current = posix.dirname(filePath);
+  while (true) {
+    directories.push(current === "." ? "" : current);
+    if (current === "." || current === "/") {
+      break;
+    }
+    current = posix.dirname(current);
+  }
+  return directories;
+}
+
+function joinRepositoryPath(directory, name) {
+  return directory ? `${directory}/${name}` : name;
+}
+
+async function declarationReference({
+  filePath,
+  blobSha256,
+  tree,
+  object,
+  kind,
+}) {
+  if (!filePath || filePath.startsWith("git-bytes:")) {
+    return null;
+  }
+  const candidates = kind === "license"
+    ? LICENSE_DECLARATION_NAMES.map((name) => joinRepositoryPath(
+        posix.dirname(filePath) === "." ? "" : posix.dirname(filePath),
+        name,
+      ))
+    : ancestorDirectories(filePath).flatMap((directory) =>
+        SOURCE_DECLARATION_NAMES.map((name) => joinRepositoryPath(directory, name)));
+
+  for (const candidate of candidates) {
+    const treeEntry = tree.get(candidate);
+    if (!treeEntry || !["100644", "100755"].includes(treeEntry.mode)) {
+      continue;
+    }
+    const candidateObject = await object(treeEntry.oid, treeEntry.mode);
+    if (
+      candidateObject?.objectType !== "blob" ||
+      candidateObject.binary ||
+      !candidateObject.blob ||
+      candidateObject.blob.bytes > MAX_DECLARATION_BYTES
+    ) {
+      continue;
+    }
+    if (kind === "source") {
+      const content = decodeUtf8(
+        runGitBuffer(["cat-file", "blob", treeEntry.oid], MAX_DECLARATION_BYTES),
+        `Файл источника ${candidate}`,
+      ).toLocaleLowerCase("en-US");
+      if (
+        !content.includes(blobSha256.toLocaleLowerCase("en-US")) &&
+        !content.includes(posix.basename(filePath).toLocaleLowerCase("en-US"))
+      ) {
+        continue;
+      }
+    }
+    return {
+      path: candidate,
+      bytes: candidateObject.blob.bytes,
+      sha256: candidateObject.blob.sha256,
+    };
+  }
+  return null;
 }
 
 async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
@@ -458,6 +612,8 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
     ]),
   );
   assertMatchingEntries(rawEntries, numstatEntries);
+  const oldTree = listTree(mergeBaseSha);
+  const newTree = listTree(headSha);
 
   const objectCache = new Map();
   const object = async (oid, mode) => {
@@ -480,18 +636,26 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
     const newObject = await object(entry.newOid, entry.newMode);
     const unsafePath = [entry.oldPath, entry.newPath]
       .some((path) => path !== null && !path.modelSafe);
-    const binaryExtension = [entry.oldPath, entry.newPath]
-      .some((path) => path?.pathEncoding === "utf8" && BINARY_EXTENSION_PATTERN.test(path.path));
-    const base85Extension = [entry.oldPath, entry.newPath]
-      .some((path) => path?.pathEncoding === "utf8" && BASE85_EXTENSION_PATTERN.test(path.path));
-    const opaqueExtension = binaryExtension || base85Extension;
-    const binary = numstatEntries[index].binary || oldObject?.binary || newObject?.binary || opaqueExtension;
+    const oldBase85 = Boolean(
+      entry.oldPath?.pathEncoding === "utf8" &&
+      BASE85_EXTENSION_PATTERN.test(entry.oldPath.path) && oldObject?.z85Payload,
+    );
+    const newBase85 = Boolean(
+      entry.newPath?.pathEncoding === "utf8" &&
+      BASE85_EXTENSION_PATTERN.test(entry.newPath.path) && newObject?.z85Payload,
+    );
+    const oldBinary = Boolean(oldObject?.binary || oldBase85);
+    const newBinary = Boolean(newObject?.binary || newBase85);
+    const binary = oldBinary || newBinary;
     entry.oldObject = oldObject;
     entry.newObject = newObject;
-    entry.omitContent = Boolean(binary || unsafePath);
+    entry.oldBinary = oldBinary;
+    entry.newBinary = newBinary;
+    entry.omitContent = binary;
+    entry.rebuildTextPatch = Boolean(!binary && (unsafePath || numstatEntries[index].binary));
     entry.binaryTransition = Boolean(
       oldObject?.objectType === "blob" && newObject?.objectType === "blob" &&
-      oldObject.binary !== newObject.binary && !unsafePath && !opaqueExtension,
+      oldBinary !== newBinary,
     );
 
     if (!entry.omitContent) {
@@ -499,6 +663,42 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
     }
     const oldPath = manifestPath(entry.oldPath);
     const newPath = manifestPath(entry.newPath);
+    const oldSource = oldBinary
+      ? await declarationReference({
+          filePath: oldPath.path,
+          blobSha256: oldObject.blob.sha256,
+          tree: oldTree,
+          object,
+          kind: "source",
+        })
+      : null;
+    const newSource = newBinary
+      ? await declarationReference({
+          filePath: newPath.path,
+          blobSha256: newObject.blob.sha256,
+          tree: newTree,
+          object,
+          kind: "source",
+        })
+      : null;
+    const oldLicense = oldBinary
+      ? await declarationReference({
+          filePath: oldPath.path,
+          blobSha256: oldObject.blob.sha256,
+          tree: oldTree,
+          object,
+          kind: "license",
+        })
+      : null;
+    const newLicense = newBinary
+      ? await declarationReference({
+          filePath: newPath.path,
+          blobSha256: newObject.blob.sha256,
+          tree: newTree,
+          object,
+          kind: "license",
+        })
+      : null;
     files.push({
       status: entry.status,
       oldPath: oldPath.path,
@@ -509,19 +709,29 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
       newPathBytesHex: newPath.pathBytesHex,
       oldMode: entry.oldMode,
       newMode: entry.newMode,
-      oldBlob: oldObject?.blob ?? null,
-      newBlob: newObject?.blob ?? null,
-      reason: unsafePath
-        ? "opaque-path"
-        : base85Extension
-          ? "base85-content"
-          : binaryExtension
-            ? "binary-extension"
-            : oldObject?.binaryReason === "base64-content" || newObject?.binaryReason === "base64-content"
-              ? "base64-content"
-              : oldObject?.binaryReason === "base85-content" || newObject?.binaryReason === "base85-content"
-                ? "base85-content"
-                : "binary-content",
+      oldBlob: oldBinary
+        ? {
+            ...oldObject.blob,
+            format: oldBase85 ? "application/z85" : oldObject.blob.format,
+            source: oldSource,
+            license: oldLicense,
+          }
+        : null,
+      newBlob: newBinary
+        ? {
+            ...newObject.blob,
+            format: newBase85 ? "application/z85" : newObject.blob.format,
+            source: newSource,
+            license: newLicense,
+          }
+        : null,
+      reason: oldBase85 || newBase85
+        ? "base85-content"
+        : oldObject?.binaryReason === "base64-content" || newObject?.binaryReason === "base64-content"
+          ? "base64-content"
+          : oldObject?.binaryReason === "base85-content" || newObject?.binaryReason === "base85-content"
+            ? "base85-content"
+            : "binary-content",
     });
   }
 
@@ -530,7 +740,7 @@ async function buildBinaryManifest(baseSha, mergeBaseSha, headSha) {
     .digest("hex");
   return {
     manifest: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       baseSha,
       mergeBaseSha,
       headSha,
@@ -568,42 +778,77 @@ function omittedPatch(entry) {
   );
 }
 
-function wholeFileHunk(content, prefix, oldSide) {
+function splitTextLines(content) {
   if (content.length === 0) {
-    return "";
+    return { lines: [], hasFinalNewline: true };
   }
   const hasFinalNewline = content.endsWith("\n");
   const lines = content.split("\n");
   if (hasFinalNewline) {
     lines.pop();
   }
-  const count = lines.length;
-  const range = oldSide ? `@@ -1,${count} +0,0 @@` : `@@ -0,0 +1,${count} @@`;
-  const body = lines.map((line) => `${prefix}${line}`).join("\n");
-  return `${range}\n${body}\n${hasFinalNewline ? "" : "\\ No newline at end of file\n"}`;
+  return { lines, hasFinalNewline };
 }
 
-function transitionPatch(entry) {
-  const oldIsText = entry.oldObject?.objectType === "blob" && !entry.oldObject.binary;
-  const textObject = oldIsText ? entry.oldObject : entry.newObject;
-  const textPath = oldIsText ? entry.oldPath.path : entry.newPath.path;
-  if (!textObject?.blob || textObject.blob.bytes > MAX_PATCH_BYTES) {
+function fullReplacementHunk(oldContent, newContent) {
+  const oldSide = splitTextLines(oldContent ?? "");
+  const newSide = splitTextLines(newContent ?? "");
+  if (oldSide.lines.length === 0 && newSide.lines.length === 0) {
+    return "";
+  }
+  const oldRange = oldSide.lines.length === 0 ? "0,0" : `1,${oldSide.lines.length}`;
+  const newRange = newSide.lines.length === 0 ? "0,0" : `1,${newSide.lines.length}`;
+  const body = [];
+  body.push(...oldSide.lines.map((line) => `-${line}`));
+  if (oldSide.lines.length > 0 && !oldSide.hasFinalNewline) {
+    body.push("\\ No newline at end of file");
+  }
+  body.push(...newSide.lines.map((line) => `+${line}`));
+  if (newSide.lines.length > 0 && !newSide.hasFinalNewline) {
+    body.push("\\ No newline at end of file");
+  }
+  return `@@ -${oldRange} +${newRange} @@\n${body.join("\n")}\n`;
+}
+
+function readSafeTextSide(object, label) {
+  if (!object?.blob) {
+    return null;
+  }
+  if (object.blob.bytes > MAX_PATCH_BYTES) {
+    throw new Error(`${label} больше допустимого безопасного diff ${MAX_PATCH_BYTES} байт.`);
+  }
+  return decodeUtf8(
+    runGitBuffer(["cat-file", "blob", object.blob.oid], MAX_PATCH_BYTES),
+    label,
+  );
+}
+
+function rebuiltTextPatch(entry, binaryCounterpart = false) {
+  const oldContent = entry.oldObject?.objectType === "blob" && !entry.oldBinary
+    ? readSafeTextSide(entry.oldObject, "Старая текстовая сторона")
+    : null;
+  const newContent = entry.newObject?.objectType === "blob" && !entry.newBinary
+    ? readSafeTextSide(entry.newObject, "Новая текстовая сторона")
+    : null;
+  if (oldContent === null && newContent === null) {
     return omittedPatch(entry);
   }
-  const content = decodeUtf8(
-    runGitBuffer(["cat-file", "blob", textObject.blob.oid], MAX_PATCH_BYTES),
-    "Текстовая сторона binary transition",
-  );
-  const oldPath = oldIsText ? `a/${textPath}` : "/dev/null";
-  const newPath = oldIsText ? "/dev/null" : `b/${textPath}`;
-  return Buffer.from([
-    `diff --git a/${textPath} b/${textPath}`,
-    `--- ${oldPath}`,
-    `+++ ${newPath}`,
-    wholeFileHunk(content, oldIsText ? "-" : "+", oldIsText).trimEnd(),
-    "Binary counterpart omitted; see binary-manifest.json.",
-    "",
-  ].filter((line, index) => line !== "" || index === 5).join("\n"), "utf8");
+  const oldName = entry.oldPath?.path ?? entry.newPath?.path ?? "неизвестный-путь";
+  const newName = entry.newPath?.path ?? entry.oldPath?.path ?? "неизвестный-путь";
+  const lines = [
+    `diff --git a/${oldName} b/${newName}`,
+    `--- ${oldContent === null ? "/dev/null" : `a/${oldName}`}`,
+    `+++ ${newContent === null ? "/dev/null" : `b/${newName}`}`,
+  ];
+  const hunk = fullReplacementHunk(oldContent, newContent).trimEnd();
+  if (hunk) {
+    lines.push(hunk);
+  }
+  if (binaryCounterpart) {
+    lines.push("Binary counterpart omitted; see binary-manifest.json.");
+  }
+  lines.push("");
+  return Buffer.from(lines.join("\n"), "utf8");
 }
 
 function sanitizePatch(patch, entries) {
@@ -611,9 +856,9 @@ function sanitizePatch(patch, entries) {
   const safeChunks = chunks.map((chunk, index) => {
     const entry = entries[index];
     if (!entry.omitContent) {
-      return chunk;
+      return entry.rebuildTextPatch ? rebuiltTextPatch(entry) : chunk;
     }
-    return entry.binaryTransition ? transitionPatch(entry) : omittedPatch(entry);
+    return entry.binaryTransition ? rebuiltTextPatch(entry, true) : omittedPatch(entry);
   });
   const result = Buffer.concat(safeChunks);
   if (result.includes(0)) {

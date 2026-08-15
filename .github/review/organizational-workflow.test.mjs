@@ -18,7 +18,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
-const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e0b175d72b86fcae0d2a7";
+const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
   return `<!-- review-binary-coverage:sha256=${hash};files=${files} -->`;
@@ -93,11 +93,11 @@ function executeRunScript({
         TRUSTED_WORKFLOW_SHA: reviewedWorkflowSha,
         BINARY_MANIFEST_SHA256: emptyManifestHash,
         BINARY_FILES: "0",
-        CODEX_BINARY_COVERAGE_CLOSED: "true",
-        CODEX_BINARY_COVERAGE_SUMMARY: "Непроверенных бинарных файлов нет.",
+        CODEX_BINARY_FILES: "0",
+        CODEX_BINARY_SUMMARY: "Исключённых бинарных файлов нет.",
         CODEX_BINARY_MANIFEST_SHA256: emptyManifestHash,
-        CLAUDE_BINARY_COVERAGE_CLOSED: "true",
-        CLAUDE_BINARY_COVERAGE_SUMMARY: "Непроверенных бинарных файлов нет.",
+        CLAUDE_BINARY_FILES: "0",
+        CLAUDE_BINARY_SUMMARY: "Исключённых бинарных файлов нет.",
         CLAUDE_BINARY_MANIFEST_SHA256: emptyManifestHash,
         ...env,
       },
@@ -242,22 +242,10 @@ case "\${script}" in
     done
     mkdir -p "$(dirname "\${diff_path}")" "$(dirname "\${manifest_path}")"
     printf '%s\n' 'diff --git a/file.txt b/file.txt' > "\${diff_path}"
-    printf '{"schemaVersion":1,"baseSha":"%s","mergeBaseSha":"%s","headSha":"%s","binaryManifestSha256":"%s","files":[]}\n' \
+    printf '{"schemaVersion":2,"baseSha":"%s","mergeBaseSha":"%s","headSha":"%s","binaryManifestSha256":"%s","files":[]}\n' \
       "\${BASE_SHA}" "\${BASE_SHA}" "\${HEAD_SHA}" '${emptyManifestHash}' > "\${manifest_path}"
     printf '{"diffBytes":%s,"manifestBytes":%s,"binaryFiles":0,"binaryManifestSha256":"%s"}\n' \
       "$(wc -c < "\${diff_path}")" "$(wc -c < "\${manifest_path}")" '${emptyManifestHash}'
-    ;;
-  *validate-binary-disposition.mjs)
-    output_path=''
-    while (( $# > 0 )); do
-      case "$1" in
-        --manifest-path) shift 2 ;;
-        --output-path) output_path="$2"; shift 2 ;;
-        *) echo "unexpected node argument: $1" >&2; exit 64 ;;
-      esac
-    done
-    mkdir -p "$(dirname "\${output_path}")"
-    printf '%s\n' '{"coverageClosed":true,"code":null,"summary":"Непроверенных бинарных файлов нет.","disposition":null}' | tee "\${output_path}"
     ;;
   *) echo "unexpected node script: \${script}" >&2; exit 64 ;;
 esac
@@ -581,12 +569,13 @@ test("Claude не получает инструменты записи, shell и
   assert.doesNotMatch(extractJob(workflow, "analyze-claude"), /path: pr-head|--add-dir|Read\(\.\/pr-head/u);
 });
 
-test("обе модели получают один формат безопасного diff и публикуют exact binary coverage", () => {
+test("обе модели получают один безопасный diff и exact binary manifest без ручного гейта", () => {
   assert.equal(workflow.split("prepare-codex-input.mjs").length - 1, 3);
-  assert.equal(workflow.split("validate-binary-disposition.mjs").length - 1, 2);
   assert.equal(workflow.split("BINARY_MANIFEST_PATH:").length - 1, 2);
   assert.match(workflow, /review-binary-coverage:sha256=\$\{binary_manifest_sha256\};files=\$\{binary_files\}/u);
-  assert.match(workflow, /C42\.1: binary disposition отсутствует или недействителен/u);
+  assert.match(workflow, /CODEX_BINARY_MANIFEST_SHA256/u);
+  assert.match(workflow, /CODEX_BINARY_SUMMARY/u);
+  assert.doesNotMatch(workflow, /binary-disposition|C42\.1|validate-binary-disposition/u);
   assert.doesNotMatch(workflow, /git diff[^\n]*> "\$\{GITHUB_WORKSPACE\}\/\.review-input/u);
 });
 
@@ -661,85 +650,6 @@ test("ручной источник проверяется без хрупких
     workflow,
     /"\$\{comment_author_association\}" != "\$\{AUTHOR_ASSOCIATION\}"/u,
   );
-});
-
-test("автор PR запускает binary disposition без write и доверия к author_association", () => {
-  const command = `/binary-disposition\n${JSON.stringify({ schemaVersion: 1 })}`;
-  const result = executeRunScript({
-    stepName: "Проверить источник запуска",
-    ghMock: contextGhMock,
-    env: contextEnv({
-      COMMAND: command,
-      TRIGGER: "disposition",
-      COMMENT_ID: "92",
-      EVENT_NAME: "issue_comment",
-      EVENT_ACTION: "created",
-      AUTHOR_ASSOCIATION: "NONE",
-      TRIGGER_ACTOR: "pr-author",
-      MOCK_COMMENT_JSON: JSON.stringify({
-        issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
-        body: command,
-        user: { login: "pr-author", id: 101 },
-        author_association: "NONE",
-      }),
-      MOCK_PR_JSON: prFixture(),
-    }),
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.outputs, /^trigger=disposition$/mu);
-  assert.match(result.outputs, /^mode=all$/mu);
-  assert.doesNotMatch(result.ghLog, /collaborators/u);
-});
-
-test("неавтор запускает binary disposition только с live write", () => {
-  const command = `/binary-disposition\n${JSON.stringify({ schemaVersion: 1 })}`;
-  const comment = JSON.stringify({
-    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
-    body: command,
-    user: { login: "writer", id: 202 },
-    author_association: "NONE",
-  });
-  const allowed = executeRunScript({
-    stepName: "Проверить источник запуска",
-    ghMock: contextGhMock,
-    env: contextEnv({
-      COMMAND: command,
-      TRIGGER: "disposition",
-      COMMENT_ID: "92",
-      EVENT_NAME: "issue_comment",
-      EVENT_ACTION: "created",
-      AUTHOR_ASSOCIATION: "NONE",
-      TRIGGER_ACTOR: "writer",
-      MOCK_COMMENT_JSON: comment,
-      MOCK_PR_JSON: prFixture(),
-      MOCK_PERMISSION: "write",
-    }),
-  });
-
-  assert.equal(allowed.status, 0, allowed.stderr);
-  assert.match(allowed.ghLog, /collaborators\/writer\/permission/u);
-
-  const denied = executeRunScript({
-    stepName: "Проверить источник запуска",
-    ghMock: contextGhMock,
-    env: contextEnv({
-      COMMAND: command,
-      TRIGGER: "disposition",
-      COMMENT_ID: "92",
-      EVENT_NAME: "issue_comment",
-      EVENT_ACTION: "created",
-      AUTHOR_ASSOCIATION: "MEMBER",
-      TRIGGER_ACTOR: "writer",
-      MOCK_COMMENT_JSON: comment,
-      MOCK_PR_JSON: prFixture(),
-      MOCK_PERMISSION: "read",
-    }),
-  });
-
-  assert.notEqual(denied.status, 0);
-  assert.match(denied.stdout, /не имеет доступа write/u);
-  assert.doesNotMatch(denied.outputs, /^trigger=/mu);
 });
 
 test("[1] актуальный и устаревший SHA события выбирают текущий Head", () => {
@@ -1353,8 +1263,11 @@ test("ручное ревью Claude с P0–P2 не показывает зел
   assert.doesNotMatch(finish.ghLog, /✅ Ручное ревью Claude завершено/u);
 });
 
-test("C42.1 оставляет итог и commit status красными без binary disposition", () => {
+test("список бинарных файлов остаётся информационным и не требует owner-подписи", () => {
   const headSha = "b".repeat(40);
+  const manifestHash = "c".repeat(64);
+  const binarySummary = "- `assets/font.woff2` — после: 1024 байт; font/woff2; SHA-256 `" +
+    `${"d".repeat(64)}\`; источник: \`assets/README.md\`; лицензия: \`assets/OFL.txt\``;
   const finish = executeRunScript({
     stepName: "Показать результат обоих ревьюеров",
     ghMock: finishStatusGhMock,
@@ -1376,18 +1289,21 @@ test("C42.1 оставляет итог и commit status красными без
       CLAUDE_PUBLISH_RESULT: "skipped",
       CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
       CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
-      CODEX_BINARY_COVERAGE_CLOSED: "false",
-      CODEX_BINARY_COVERAGE_SUMMARY: "Для текущего binary manifest нет disposition.",
-      CLAUDE_BINARY_COVERAGE_CLOSED: "false",
-      CLAUDE_BINARY_COVERAGE_SUMMARY: "Для текущего binary manifest нет disposition.",
+      CODEX_BINARY_FILES: "1",
+      CODEX_BINARY_SUMMARY: binarySummary,
+      CODEX_BINARY_MANIFEST_SHA256: manifestHash,
+      CLAUDE_BINARY_FILES: "1",
+      CLAUDE_BINARY_SUMMARY: binarySummary,
+      CLAUDE_BINARY_MANIFEST_SHA256: manifestHash,
       REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
     },
   });
 
   assert.equal(finish.status, 0, finish.stderr);
-  assert.match(finish.ghLog, /C42\.1/u);
-  assert.match(finish.ghLog, /--raw-field state=failure/u);
-  assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
+  assert.match(finish.ghLog, /Бинарные байты исключены из входа моделей: \*\*1\*\*/u);
+  assert.match(finish.ghLog, /assets\/font\.woff2/u);
+  assert.match(finish.ghLog, /--raw-field state=success/u);
+  assert.doesNotMatch(finish.ghLog, /binary-disposition|C42\.1/u);
 });
 
 test("старое ревью без доверенных метрик запускает модель повторно", () => {

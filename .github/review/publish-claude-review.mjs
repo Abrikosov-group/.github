@@ -401,7 +401,7 @@ export function validateBinaryManifest(rawManifest, baseSha, headSha) {
     "Binary manifest",
   );
   if (
-    manifest.schemaVersion !== 1 ||
+    manifest.schemaVersion !== 2 ||
     manifest.baseSha !== baseSha ||
     manifest.headSha !== headSha ||
     !SHA_PATTERN.test(manifest.mergeBaseSha) ||
@@ -419,6 +419,14 @@ export function validateBinaryManifest(rawManifest, baseSha, headSha) {
   const paths = new Set();
   for (const [index, file] of manifest.files.entries()) {
     assertPlainObject(file, `Binary manifest file ${index + 1}`);
+    assertExactKeys(
+      file,
+      [
+        "status", "oldPath", "newPath", "oldPathEncoding", "newPathEncoding",
+        "oldPathBytesHex", "newPathBytesHex", "oldMode", "newMode", "oldBlob", "newBlob", "reason",
+      ],
+      `Binary manifest file ${index + 1}`,
+    );
     const path = file.newPath ?? file.oldPath;
     if (
       typeof path !== "string" ||
@@ -432,22 +440,78 @@ export function validateBinaryManifest(rawManifest, baseSha, headSha) {
       throw new Error(`Binary manifest содержит повторяющийся path: ${JSON.stringify(path)}.`);
     }
     paths.add(path);
+    for (const [side, blob] of [["oldBlob", file.oldBlob], ["newBlob", file.newBlob]]) {
+      if (blob === null) {
+        continue;
+      }
+      assertPlainObject(blob, `Binary manifest file ${index + 1} ${side}`);
+      assertExactKeys(
+        blob,
+        ["oid", "bytes", "sha256", "format", "source", "license"],
+        `Binary manifest file ${index + 1} ${side}`,
+      );
+      if (
+        !SHA_PATTERN.test(blob.oid) ||
+        !Number.isSafeInteger(blob.bytes) || blob.bytes < 0 ||
+        !/^[0-9a-f]{64}$/u.test(blob.sha256) ||
+        typeof blob.format !== "string" || blob.format.length < 1 || blob.format.length > 128 ||
+        /[\u0000-\u001f\u007f<>`]/u.test(blob.format)
+      ) {
+        throw new Error(`Binary manifest file ${index + 1} ${side} содержит некорректные метаданные.`);
+      }
+      for (const [kind, reference] of [["source", blob.source], ["license", blob.license]]) {
+        if (reference === null) {
+          continue;
+        }
+        assertPlainObject(reference, `Binary manifest file ${index + 1} ${side} ${kind}`);
+        assertExactKeys(
+          reference,
+          ["path", "bytes", "sha256"],
+          `Binary manifest file ${index + 1} ${side} ${kind}`,
+        );
+        if (
+          typeof reference.path !== "string" || reference.path.length < 1 ||
+          reference.path.length > MAX_BINARY_PATH_LENGTH ||
+          UNSAFE_BINARY_PATH_PATTERN.test(reference.path) ||
+          !Number.isSafeInteger(reference.bytes) || reference.bytes < 0 ||
+          !/^[0-9a-f]{64}$/u.test(reference.sha256)
+        ) {
+          throw new Error(`Binary manifest file ${index + 1} ${side} ${kind} некорректен.`);
+        }
+      }
+    }
+    if (file.oldBlob === null && file.newBlob === null) {
+      throw new Error(`Binary manifest file ${index + 1} не содержит исключённой стороны.`);
+    }
   }
   return manifest;
 }
 
+function renderBinaryBlob(label, blob) {
+  const source = blob.source === null ? "не указан" : `\`${blob.source.path.replaceAll("`", "\\`")}\``;
+  const license = blob.license === null ? "не указана" : `\`${blob.license.path.replaceAll("`", "\\`")}\``;
+  return `${label}: ${blob.bytes} байт; ${blob.format}; SHA-256 \`${blob.sha256}\`; ` +
+    `источник: ${source}; лицензия: ${license}`;
+}
+
 export function buildBinaryCoverageSection(manifest) {
   if (manifest.files.length === 0) {
-    return ["", "### Граница проверки бинарных файлов", "", "Непроверенных бинарных файлов нет."];
+    return ["", "### Граница анализа бинарных файлов", "", "Исключённых бинарных файлов нет."];
   }
   return [
     "",
-    "### Граница проверки бинарных файлов",
+    "### Граница анализа бинарных файлов",
     "",
-    `Непроверенных бинарных файлов: **${manifest.files.length}**.`,
-    "Содержимое перечисленных файлов моделью не проверялось:",
+    `Исключённых бинарных файлов: **${manifest.files.length}**.`,
+    "Их байты моделью не проверялись; вместо них использованы точные метаданные:",
     "",
-    ...manifest.files.map((file) => `- \`${(file.newPath ?? file.oldPath).replaceAll("`", "\\`")}\``),
+    ...manifest.files.flatMap((file) => {
+      const path = (file.newPath ?? file.oldPath).replaceAll("`", "\\`");
+      const sides = [];
+      if (file.oldBlob !== null) sides.push(renderBinaryBlob("до", file.oldBlob));
+      if (file.newBlob !== null) sides.push(renderBinaryBlob("после", file.newBlob));
+      return [`- \`${path}\` — ${sides.join("; ")}`];
+    }),
     "",
     `Binary manifest: \`${manifest.binaryManifestSha256}\`.`,
   ];
