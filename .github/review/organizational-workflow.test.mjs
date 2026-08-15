@@ -440,6 +440,19 @@ test("центральный caller передаёт полный контрак
   }
 });
 
+test("центральный caller разрешает status-права reusable workflow", () => {
+  const callerPermissions = organizationCaller.match(
+    /\npermissions:\n([\s\S]*?)\njobs:/u,
+  )?.[1];
+  assert.ok(callerPermissions, "top-level permissions центрального caller не найдены");
+  assert.match(callerPermissions, /^  statuses: write$/mu);
+
+  for (const jobId of ["start-status", "finish-status"]) {
+    const job = extractJob(workflow, jobId);
+    assert.match(job, /permissions:[\s\S]*?statuses: write/u);
+  }
+});
+
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
   const codexJob = workflow.match(/\n  analyze-codex:[\s\S]*?(?=\n  publish-codex:)/u)?.[0];
 
