@@ -587,6 +587,10 @@ test("публикация Claude не запускается без созда�
     /- name: Передать безопасный вход издателю\n\s+if: steps\.existing\.outputs\.needed == 'true'/u,
   );
   assert.match(
+    analyzeJob,
+    /name: claude-review-input\n\s+path: \.review-input\n\s+include-hidden-files: true/u,
+  );
+  assert.match(
     publishJob,
     /if: needs\.analyze-claude\.outputs\.review_needed == 'true'/u,
   );
