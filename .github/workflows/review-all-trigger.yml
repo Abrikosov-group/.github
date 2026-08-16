@@ -133,13 +133,13 @@ jobs:
     name: Повторить двойное ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@17db2e756806886cefd55c425a99ea629660662b
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@907a587b719daf6aa4fad1064802336a7ca1a366
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 17db2e756806886cefd55c425a99ea629660662b
+      trusted_workflow_sha: 907a587b719daf6aa4fad1064802336a7ca1a366
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
