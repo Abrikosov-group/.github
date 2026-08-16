@@ -8,6 +8,7 @@ name: Запуск организационного двойного ИИ-рев
     types: [opened, ready_for_review, synchronize, reopened, edited]
 
 permissions:
+  actions: read
   contents: read
   issues: write
   pull-requests: write
@@ -131,11 +132,13 @@ jobs:
     name: Повторить двойное ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@ce8a887cbb97fd01afcc65384d34046431613dd9
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@17db2e756806886cefd55c425a99ea629660662b
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
+      trusted_workflow_repository: Abrikosov-group/.github
+      trusted_workflow_sha: 17db2e756806886cefd55c425a99ea629660662b
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
@@ -148,7 +151,8 @@ jobs:
       expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
       expected_codex_runner_name: sawabook-review-codex-179-198-117-215
       expected_claude_runner_name: sawabook-review-claude-179-198-117-215
-      reuse_existing_reviews: true
+      reuse_existing_reviews: false
+      review_gate_context: Canary нового ИИ-ревью
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
