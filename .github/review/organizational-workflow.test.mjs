@@ -570,11 +570,17 @@ test("Claude не получает инструменты записи, shell и
 });
 
 test("обе модели получают один безопасный diff и exact binary manifest без ручного гейта", () => {
+  const prepareCodexJob = extractJob(workflow, "prepare-codex");
+
   assert.equal(workflow.split("prepare-codex-input.mjs").length - 1, 3);
   assert.equal(workflow.split("BINARY_MANIFEST_PATH:").length - 1, 2);
   assert.match(workflow, /review-binary-coverage:sha256=\$\{binary_manifest_sha256\};files=\$\{binary_files\}/u);
   assert.match(workflow, /CODEX_BINARY_MANIFEST_SHA256/u);
   assert.match(workflow, /CODEX_BINARY_SUMMARY/u);
+  assert.match(
+    prepareCodexJob,
+    /name: codex-review-input\n\s+path: \.review-input\/codex\n\s+include-hidden-files: true/u,
+  );
   assert.doesNotMatch(workflow, /binary-disposition|C42\.1|validate-binary-disposition/u);
   assert.doesNotMatch(workflow, /git diff[^\n]*> "\$\{GITHUB_WORKSPACE\}\/\.review-input/u);
 });
@@ -585,6 +591,10 @@ test("публикация Claude не запускается без созда�
   assert.match(
     analyzeJob,
     /- name: Передать безопасный вход издателю\n\s+if: steps\.existing\.outputs\.needed == 'true'/u,
+  );
+  assert.match(
+    analyzeJob,
+    /name: claude-review-input\n\s+path: \.review-input\n\s+include-hidden-files: true/u,
   );
   assert.match(
     publishJob,
