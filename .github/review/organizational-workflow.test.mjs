@@ -18,6 +18,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
+const manualCanaryWorkflowSha = "17db2e756806886cefd55c425a99ea629660662b";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -476,13 +477,14 @@ test("исполняемый организационный код закреп�
   assert.doesNotMatch(organizationCaller, /review-all\.yml@main/u);
   const reviewedWorkflowReference =
     `Abrikosov-group/.github/.github/workflows/review-all.yml@${reviewedWorkflowSha}`;
+  const manualCanaryWorkflowReference =
+    `Abrikosov-group/.github/.github/workflows/review-all.yml@${manualCanaryWorkflowSha}`;
   assert.equal(caller.split(reviewedWorkflowReference).length - 1, 2);
-  assert.equal(organizationCaller.split(reviewedWorkflowReference).length - 1, 2);
+  assert.equal(organizationCaller.split(reviewedWorkflowReference).length - 1, 1);
+  assert.equal(organizationCaller.split(manualCanaryWorkflowReference).length - 1, 1);
 });
 
 test("центральный caller передаёт полный контракт доверенных runner", () => {
-  const reviewedWorkflowReference =
-    `uses: Abrikosov-group/.github/.github/workflows/review-all.yml@${reviewedWorkflowSha}`;
   const expectedInputs = [
     "automatic_base_refs: main",
     'manual_base_refs: "*"',
@@ -493,16 +495,35 @@ test("центральный caller передаёт полный контрак
     "expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215",
     "expected_codex_runner_name: sawabook-review-codex-179-198-117-215",
     "expected_claude_runner_name: sawabook-review-claude-179-198-117-215",
-    "reuse_existing_reviews: true",
   ];
 
   for (const jobId of ["manual-review", "automatic-review"]) {
     const job = extractJob(organizationCaller, jobId);
-    assert.ok(job.includes(reviewedWorkflowReference), `${jobId}: неверный reusable workflow`);
     for (const input of expectedInputs) {
       assert.ok(job.includes(`      ${input}`), `${jobId}: отсутствует ${input}`);
     }
   }
+
+  const manualJob = extractJob(organizationCaller, "manual-review");
+  assert.match(
+    manualJob,
+    new RegExp(`uses: Abrikosov-group/\\.github/\\.github/workflows/review-all\\.yml@${manualCanaryWorkflowSha}`, "u"),
+  );
+  assert.match(manualJob, /trusted_workflow_repository: Abrikosov-group\/\.github/u);
+  assert.match(
+    manualJob,
+    new RegExp(`trusted_workflow_sha: ${manualCanaryWorkflowSha}`, "u"),
+  );
+  assert.match(manualJob, /reuse_existing_reviews: false/u);
+  assert.match(manualJob, /review_gate_context: Canary нового ИИ-ревью/u);
+
+  const automaticJob = extractJob(organizationCaller, "automatic-review");
+  assert.match(
+    automaticJob,
+    new RegExp(`uses: Abrikosov-group/\\.github/\\.github/workflows/review-all\\.yml@${reviewedWorkflowSha}`, "u"),
+  );
+  assert.match(automaticJob, /reuse_existing_reviews: true/u);
+  assert.doesNotMatch(automaticJob, /Canary нового ИИ-ревью/u);
 });
 
 test("центральный caller разрешает status-права reusable workflow", () => {
@@ -510,6 +531,7 @@ test("центральный caller разрешает status-права reusabl
     /\npermissions:\n([\s\S]*?)\njobs:/u,
   )?.[1];
   assert.ok(callerPermissions, "top-level permissions центрального caller не найдены");
+  assert.match(callerPermissions, /^  actions: read$/mu);
   assert.match(callerPermissions, /^  statuses: write$/mu);
 
   for (const jobId of ["start-status", "finish-status"]) {
