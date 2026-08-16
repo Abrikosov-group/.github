@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import test from "node:test";
 
 import {
   buildReviewPayload,
+  buildBinaryCoverageSection,
   buildStaleReviewBody,
   collectDiffAnchors,
   collectDiffLines,
@@ -14,6 +16,8 @@ import {
   reviewNeeded,
   reviewMarker,
   trustedReviewBlockingFindings,
+  trustedBinaryCoverage,
+  validateBinaryManifest,
   validateFindingAnchors,
   validateReviewJson,
 } from "./publish-claude-review.mjs";
@@ -26,6 +30,49 @@ const SPARK_MODEL = "gpt-5.3-codex-spark";
 
 function findingsMarker({ p0 = 0, p1 = 0, p2 = 0 } = {}) {
   return `<!-- review-findings:P0=${p0};P1=${p1};P2=${p2} -->`;
+}
+
+function binaryManifest(files = []) {
+  const normalizedFiles = files.map((file, index) => {
+    const blob = {
+      oid: String(index + 3).repeat(40),
+      bytes: 1024 + index,
+      sha256: String(index + 3).repeat(64),
+      format: index === 0 ? "font/woff2" : "application/pdf",
+      source: index === 0
+        ? { path: "assets/README.md", bytes: 120, sha256: "a".repeat(64) }
+        : null,
+      license: index === 0
+        ? { path: "assets/OFL.txt", bytes: 240, sha256: "b".repeat(64) }
+        : null,
+    };
+    return {
+      status: file.oldPath === null ? "A" : file.newPath === null ? "D" : "M",
+      oldPath: file.oldPath,
+      newPath: file.newPath,
+      oldPathEncoding: file.oldPath === null ? null : "utf8",
+      newPathEncoding: file.newPath === null ? null : "utf8",
+      oldPathBytesHex: null,
+      newPathBytesHex: null,
+      oldMode: file.oldPath === null ? null : "100644",
+      newMode: file.newPath === null ? null : "100644",
+      oldBlob: file.oldPath === null ? null : blob,
+      newBlob: file.newPath === null ? null : blob,
+      reason: "binary-content",
+    };
+  });
+  return {
+    schemaVersion: 2,
+    baseSha: BASE_SHA,
+    mergeBaseSha: BASE_SHA,
+    headSha: HEAD_SHA,
+    binaryManifestSha256: createHash("sha256").update(JSON.stringify(normalizedFiles)).digest("hex"),
+    files: normalizedFiles,
+  };
+}
+
+function binaryCoverageMarker(manifest = binaryManifest()) {
+  return `<!-- review-binary-coverage:sha256=${manifest.binaryManifestSha256};files=${manifest.files.length} -->`;
 }
 
 function fileDiff({ oldPath = "src/example.ts", newPath = "src/example.ts", hunk }) {
@@ -53,6 +100,7 @@ async function runMainWithFetch(fetchImplementation, environmentOverrides = {}) 
     GH_TOKEN: "test-token-without-production-access",
     REVIEW_MODEL: STANDARD_MODEL,
     REVIEW_JSON: JSON.stringify({ findings: [] }),
+    BINARY_MANIFEST_JSON: JSON.stringify(binaryManifest()),
     ...environmentOverrides,
   };
   const previousEnvironment = new Map(
@@ -112,6 +160,27 @@ test("валидирует строгий результат Claude", () => {
   assert.deepEqual(validateReviewJson(JSON.stringify(validReview())), validReview());
 });
 
+test("делает видимыми Unicode-символы из сбоя запуска 31894613583", () => {
+  const review = validReview();
+  review.findings[0].body =
+    "Фильтр должен распознавать невидимые символы (\u200b-\u200f, \u2060, \ufeff) в имени файла.";
+
+  const validated = validateReviewJson(review);
+
+  assert.equal(
+    validated.findings[0].body,
+    "Фильтр должен распознавать невидимые символы (U+200B-U+200F, U+2060, U+FEFF) в имени файла.",
+  );
+  assert.doesNotMatch(validated.findings[0].body, /\p{Cf}/u);
+});
+
+test("после нормализации по-прежнему отклоняет скрытую разметку", () => {
+  const review = validReview();
+  review.findings[0].body = "Проверка пропускает <!-- служебный маркер --> внутри результата.";
+
+  assert.throws(() => validateReviewJson(review), /скрытую разметку/u);
+});
+
 test("отклоняет неизвестные поля и обход пути", () => {
   assert.throws(
     () => validateReviewJson({ ...validReview(), summary: "лишнее" }),
@@ -137,6 +206,10 @@ test("отклоняет дубли одной строки и похожие н
   const leakedSecret = validReview();
   leakedSecret.findings[0].body = `Утечка sk-ant-${"a".repeat(24)}`;
   assert.throws(() => validateReviewJson(leakedSecret), /похоже на секрет/u);
+
+  const obfuscatedSecret = validReview();
+  obfuscatedSecret.findings[0].body = `Утечка sk-ant-\u200b${"a".repeat(24)}`;
+  assert.throws(() => validateReviewJson(obfuscatedSecret), /похоже на секрет/u);
 
   const telegramToken = validReview();
   telegramToken.findings[0].body = `Утечка 123456789:AA${"b".repeat(33)}`;
@@ -233,6 +306,24 @@ test("неизвестный путь безопасно классифицир�
   assert.deepEqual(partition.unanchored, [finding]);
 });
 
+test("реконструированный безопасный patch публикует замечания только в итоге ревью", () => {
+  const finding = validReview().findings[0];
+  const reconstructedDiff = [
+    "diff --git a/src/example.ts b/src/example.ts",
+    "review-safe-reconstructed-patch true",
+    "--- a/src/example.ts",
+    "+++ b/src/example.ts",
+    "@@ -1,12 +1,12 @@",
+    "-old",
+    "+new",
+  ].join("\n");
+
+  const partition = partitionFindingAnchors([finding], reconstructedDiff);
+
+  assert.deepEqual(partition.anchored, []);
+  assert.deepEqual(partition.unanchored, [finding]);
+});
+
 test("доверяет ровно одному корректному маркеру метрик", () => {
   assert.equal(trustedReviewBlockingFindings({ body: findingsMarker({ p1: 2, p2: 1 }) }), 3);
   assert.equal(trustedReviewBlockingFindings({ body: "legacy review" }), null);
@@ -282,6 +373,49 @@ test("создаёт одно review с итогом и inline comments", () => 
       body: "[P1] Проверка пропускает ошибку\n\nПри отрицательном значении запрос завершается с неверным результатом.",
     },
   ]);
+});
+
+test("публикует точную границу бинарного анализа и доверяет только связанному marker", () => {
+  const files = [
+    { oldPath: null, newPath: "assets/font.woff2" },
+    { oldPath: "docs/old.pdf", newPath: null },
+  ];
+  const manifest = validateBinaryManifest(binaryManifest(files), BASE_SHA, HEAD_SHA);
+  const payload = buildReviewPayload(
+    { findings: [] },
+    BASE_SHA,
+    HEAD_SHA,
+    STANDARD_MODEL,
+    { binaryManifest: manifest },
+  );
+
+  assert.match(payload.body, /Исключённых бинарных файлов: \*\*2\*\*/u);
+  assert.match(payload.body, /`assets\/font\.woff2`/u);
+  assert.match(payload.body, /`docs\/old\.pdf`/u);
+  assert.match(payload.body, /Их байты моделью не проверялись/u);
+  assert.match(payload.body, /font\/woff2/u);
+  assert.match(payload.body, /источник: `assets\/README\.md`/u);
+  assert.match(payload.body, /лицензия: `assets\/OFL\.txt`/u);
+  assert.equal(trustedBinaryCoverage({ body: payload.body }, manifest), true);
+  assert.equal(
+    trustedBinaryCoverage(
+      { body: payload.body.replace(manifest.binaryManifestSha256, "0".repeat(64)) },
+      manifest,
+    ),
+    false,
+  );
+  assert.deepEqual(
+    buildBinaryCoverageSection(validateBinaryManifest(binaryManifest(), BASE_SHA, HEAD_SHA)).slice(-1),
+    ["Исключённых бинарных файлов нет."],
+  );
+  assert.throws(
+    () => validateBinaryManifest(binaryManifest([{ oldPath: null, newPath: "danger`marker.pdf" }]), BASE_SHA, HEAD_SHA),
+    /допустимый path/u,
+  );
+  assert.throws(
+    () => validateBinaryManifest(binaryManifest([{ oldPath: null, newPath: "danger\u200bmarker.pdf" }]), BASE_SHA, HEAD_SHA),
+    /допустимый path/u,
+  );
 });
 
 test("создаёт итог без inline comments при пустом результате", () => {
@@ -561,7 +695,7 @@ test("не публикует повторное ревью того же diff",
       {
         user: { login: "github-actions[bot]" },
         id: 20,
-        body: `${marker}\n${findingsMarker({ p1: 1 })}`,
+        body: `${marker}\n${findingsMarker({ p1: 1 })}\n${binaryCoverageMarker()}`,
         html_url: "https://github.com/example/sawabook/pull/55#existing-review",
       },
     ]);
