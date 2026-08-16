@@ -255,7 +255,6 @@ jobs:
                 <<< "${comment_json}")"
               comment_body="$(jq -er '.body' <<< "${comment_json}")"
               comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
-              comment_author_association="$(jq -er '.author_association' <<< "${comment_json}")"
               comment_author_normalized="$(tr '[:upper:]' '[:lower:]' <<< "${comment_author}")"
               trigger_actor_normalized="$(tr '[:upper:]' '[:lower:]' <<< "${TRIGGER_ACTOR}")"
 
@@ -271,13 +270,6 @@ jobs:
                 echo "::error::Автор комментария не совпадает с инициатором workflow"
                 exit 1
               fi
-              case "${comment_author_association}" in
-                OWNER|MEMBER|COLLABORATOR) ;;
-                *)
-                  echo "::error::Фактический автор комментария не имеет права запускать ревью"
-                  exit 1
-                  ;;
-              esac
               require_write_permission "${comment_author}"
               ;;
             automatic)

@@ -329,6 +329,7 @@ function acknowledgementEnv(overrides = {}) {
     PR_NUMBER: "17",
     COMMENT_ID: "91",
     TRIGGER_ACTOR: "alice",
+    AUTHOR_ASSOCIATION: "MEMBER",
     RUN_ATTEMPT: "1",
     MOCK_COMMENT_JSON: commandCommentFixture(),
     MOCK_PR_JSON: prFixture(),
@@ -668,7 +669,7 @@ test("Claude запускается из точного доверенного B
   );
 });
 
-test("ручной источник проверяется без хрупких сравнений URL, регистра и снимков роли", () => {
+test("ручной источник проверяется без хрупких сравнений URL, регистра и API-снимков роли", () => {
   assert.match(workflow, /TRIGGER_ACTOR: \$\{\{ github\.actor \}\}/u);
   assert.match(workflow, /capture\("\/issues\/\(\?<number>\[1-9\]\[0-9\]\*\)\$"\)/u);
   assert.match(
@@ -676,7 +677,8 @@ test("ручной источник проверяется без хрупких
     /"\$\{comment_author_normalized\}" != "\$\{trigger_actor_normalized\}"/u,
   );
   assert.match(workflow, /tr '\[:upper:\]' '\[:lower:\]'/u);
-  assert.match(workflow, /case "\$\{comment_author_association\}" in/u);
+  assert.doesNotMatch(workflow, /comment_author_association=/u);
+  assert.match(workflow, /require_write_permission "\$\{comment_author\}"/u);
   assert.doesNotMatch(workflow, /expected_issue_url/u);
   assert.doesNotMatch(
     workflow,
@@ -794,7 +796,7 @@ test("ручной запуск допускает регистр логина �
   assert.match(result.outputs, new RegExp(`^head_sha=${headSha}$`, "mu"));
 });
 
-test("повторный API-запрос не доверяет фактической роли NONE", () => {
+test("API-снимок association NONE не отменяет фактический write-доступ", () => {
   const comment = JSON.stringify({
     issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
     body: "/review-all",
@@ -815,8 +817,53 @@ test("повторный API-запрос не доверяет фактичес
     }),
   });
 
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, /^head_sha=/mu);
+  assert.match(result.ghLog, /\/collaborators\/alice\/permission/u);
+});
+
+test("caller подтверждает MEMBER из события при API-снимке association NONE", () => {
+  const apiComment = JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: "/review-all",
+    user: { login: "alice" },
+    author_association: "NONE",
+  });
+
+  for (const source of [caller, organizationCaller]) {
+    const result = executeRunScript({
+      source,
+      stepName: "Проверить и подтвердить ручную команду",
+      ghMock: acknowledgementGhMock,
+      env: acknowledgementEnv({
+        AUTHOR_ASSOCIATION: "MEMBER",
+        MOCK_COMMENT_JSON: apiComment,
+      }),
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, /^accepted=true$/mu);
+  }
+});
+
+test("ручной запуск отклоняет инициатора без фактического write-доступа", () => {
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMENT_ID: "91",
+      AUTHOR_ASSOCIATION: "MEMBER",
+      TRIGGER: "manual",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      MOCK_COMMENT_JSON: commandCommentFixture(),
+      MOCK_PR_JSON: prFixture(),
+      MOCK_PERMISSION: "read",
+    }),
+  });
+
   assert.notEqual(result.status, 0);
-  assert.match(result.stdout, /Фактический автор комментария не имеет права/u);
+  assert.match(result.stdout, /не имеет доступа write/u);
 });
 
 test("[3] автоматический запуск вне разрешённых веток и из форка запрещён", () => {
@@ -1102,9 +1149,10 @@ test("[4] посторонний автор, Draft и закрытый PR не �
         issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
         body: "/review-all",
         user: { login: "mallory" },
-        author_association: "NONE",
+        author_association: "MEMBER",
       }),
       TRIGGER_ACTOR: "mallory",
+      AUTHOR_ASSOCIATION: "NONE",
     }),
   });
   assert.notEqual(unauthorized.status, 0);
