@@ -39,6 +39,7 @@ jobs:
       PR_NUMBER: ${{ github.event.issue.number }}
       COMMENT_ID: ${{ github.event.comment.id }}
       TRIGGER_ACTOR: ${{ github.actor }}
+      AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
 
     steps:
@@ -55,26 +56,26 @@ jobs:
             exit 1
           fi
 
-          comment_json="$(gh api "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}")"
-          comment_issue_number="$(jq -er \
-            '.issue_url | capture("/issues/(?<number>[1-9][0-9]*)$").number' \
-            <<< "${comment_json}")"
-          comment_body="$(jq -er '.body' <<< "${comment_json}")"
-          comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
-          comment_author_association="$(jq -er '.author_association' <<< "${comment_json}")"
-          if [[ "${comment_issue_number}" != "${PR_NUMBER}" ||
-                "${comment_body}" != "/review-all" ||
-                "${comment_author}" != "${TRIGGER_ACTOR}" ]]; then
-            echo "::error::Комментарий не совпадает с событием ручной команды"
-            exit 1
-          fi
-          case "${comment_author_association}" in
+          case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) ;;
             *)
               echo "::error::Автор комментария не имеет права запускать ревью"
               exit 1
               ;;
           esac
+
+          comment_json="$(gh api "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}")"
+          comment_issue_number="$(jq -er \
+            '.issue_url | capture("/issues/(?<number>[1-9][0-9]*)$").number' \
+            <<< "${comment_json}")"
+          comment_body="$(jq -er '.body' <<< "${comment_json}")"
+          comment_author="$(jq -er '.user.login' <<< "${comment_json}")"
+          if [[ "${comment_issue_number}" != "${PR_NUMBER}" ||
+                "${comment_body}" != "/review-all" ||
+                "${comment_author}" != "${TRIGGER_ACTOR}" ]]; then
+            echo "::error::Комментарий не совпадает с событием ручной команды"
+            exit 1
+          fi
 
           if (( RUN_ATTEMPT > 1 )); then
             reactions="$(gh api --paginate --slurp \
@@ -132,13 +133,13 @@ jobs:
     name: Повторить двойное ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@17db2e756806886cefd55c425a99ea629660662b
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@907a587b719daf6aa4fad1064802336a7ca1a366
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 17db2e756806886cefd55c425a99ea629660662b
+      trusted_workflow_sha: 907a587b719daf6aa4fad1064802336a7ca1a366
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
