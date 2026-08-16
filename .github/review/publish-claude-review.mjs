@@ -246,12 +246,18 @@ export function collectDiffAnchors(diff) {
   let oldPath = null;
   let currentLines = null;
   let readingHeaders = false;
+  let inlineAnchorsAllowed = true;
 
   for (const line of diff.split("\n")) {
     if (line.startsWith("diff --git ")) {
       oldPath = null;
       currentLines = null;
       readingHeaders = true;
+      inlineAnchorsAllowed = true;
+      continue;
+    }
+    if (readingHeaders && line === "review-safe-reconstructed-patch true") {
+      inlineAnchorsAllowed = false;
       continue;
     }
     if (readingHeaders && line.startsWith("--- ")) {
@@ -265,7 +271,9 @@ export function collectDiffAnchors(diff) {
         throw new Error("Diff не содержит путь ни для старой, ни для новой версии файла.");
       }
       currentLines = anchorsByPath.get(reviewPath) ?? { LEFT: new Set(), RIGHT: new Set() };
-      anchorsByPath.set(reviewPath, currentLines);
+      if (inlineAnchorsAllowed) {
+        anchorsByPath.set(reviewPath, currentLines);
+      }
       readingHeaders = false;
       continue;
     }

@@ -317,6 +317,11 @@ function inspectObject(oid) {
     let base64MarkedPayload = false;
     let base64MarkedCharacters = 0;
     let base64MarkedPayloadDetected = false;
+    let base64LineCharacters = 0;
+    let base64LineValid = true;
+    let base64WrappedBlockCharacters = 0;
+    let base64WrappedBlockLines = 0;
+    let base64WrappedPayloadDetected = false;
     let ascii85Open = false;
     let ascii85PendingTilde = false;
     let ascii85Characters = 0;
@@ -326,6 +331,26 @@ function inspectObject(oid) {
     let previousByte = null;
     let stderr = Buffer.alloc(0);
     const base64Marker = Buffer.from("base64,", "ascii");
+    const finishBase64Line = () => {
+      const encodedLine = base64LineValid &&
+        base64LineCharacters >= 32 &&
+        base64LineCharacters % 4 === 0;
+      if (encodedLine) {
+        base64WrappedBlockCharacters += base64LineCharacters;
+        base64WrappedBlockLines += 1;
+        if (
+          base64WrappedBlockLines >= 2 &&
+          base64WrappedBlockCharacters >= ENCODED_PAYLOAD_MIN_BYTES
+        ) {
+          base64WrappedPayloadDetected = true;
+        }
+      } else {
+        base64WrappedBlockCharacters = 0;
+        base64WrappedBlockLines = 0;
+      }
+      base64LineCharacters = 0;
+      base64LineValid = true;
+    };
     const child = spawn("git", ["cat-file", "blob", oid], {
       env: gitEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -345,6 +370,15 @@ function inspectObject(oid) {
           (byte >= 0x30 && byte <= 0x39) ||
           byte === 0x2b || byte === 0x2f || byte === 0x3d;
         const whitespace = byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20;
+        if (byte === 0x0a) {
+          finishBase64Line();
+        } else if (byte !== 0x0d) {
+          if (base64Character) {
+            base64LineCharacters += 1;
+          } else {
+            base64LineValid = false;
+          }
+        }
         const z85Character = Z85_ALPHABET.has(byte);
         if (z85Character) {
           z85Characters += 1;
@@ -442,9 +476,13 @@ function inspectObject(oid) {
           validUtf8 = false;
         }
       }
+      if (base64LineCharacters > 0 || !base64LineValid) {
+        finishBase64Line();
+      }
       const base64Payload = bytes >= ENCODED_PAYLOAD_MIN_BYTES && (
         longestBase64Run >= ENCODED_PAYLOAD_MIN_BYTES ||
         base64MarkedPayloadDetected ||
+        base64WrappedPayloadDetected ||
         (
           base64OtherCharacters === 0 &&
           base64Characters / bytes >= 0.95
@@ -810,6 +848,120 @@ function fullReplacementHunk(oldContent, newContent) {
   return `@@ -${oldRange} +${newRange} @@\n${body.join("\n")}\n`;
 }
 
+function usesRawPatch(entry) {
+  return !entry.omitContent && !entry.rebuildTextPatch;
+}
+
+function runGitFilteredPatch(args, entries) {
+  if (entries.length === 0) {
+    return Promise.resolve(Buffer.alloc(0));
+  }
+
+  return new Promise((resolve, reject) => {
+    const boundary = Buffer.from("\ndiff --git ");
+    const prefix = boundary.subarray(1);
+    const output = [];
+    let outputBytes = 0;
+    let pending = Buffer.alloc(0);
+    let currentEntry = 0;
+    let verifiedPrefix = false;
+    let parseError = null;
+    let spawnError = null;
+    let stderr = Buffer.alloc(0);
+    const child = spawn("git", args, {
+      env: gitEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const emit = (value) => {
+      if (value.length === 0 || !usesRawPatch(entries[currentEntry])) {
+        return;
+      }
+      outputBytes += value.length;
+      if (outputBytes > MAX_PATCH_BYTES) {
+        throw new Error(`Безопасный текстовый diff больше ${MAX_PATCH_BYTES} байт.`);
+      }
+      output.push(value);
+    };
+
+    const consume = () => {
+      if (!verifiedPrefix) {
+        if (pending.length < prefix.length) {
+          return;
+        }
+        if (!pending.subarray(0, prefix.length).equals(prefix)) {
+          throw new Error("Git patch не начинается с ожидаемого заголовка diff --git.");
+        }
+        verifiedPrefix = true;
+      }
+
+      let index;
+      while ((index = pending.indexOf(boundary)) !== -1) {
+        emit(pending.subarray(0, index + 1));
+        currentEntry += 1;
+        if (currentEntry >= entries.length) {
+          throw new Error("Git patch содержит больше записей, чем raw diff.");
+        }
+        pending = pending.subarray(index + 1);
+      }
+
+      const flushBytes = Math.max(0, pending.length - (boundary.length - 1));
+      emit(pending.subarray(0, flushBytes));
+      pending = pending.subarray(flushBytes);
+    };
+
+    child.stdout.on("data", (chunk) => {
+      if (parseError !== null) {
+        return;
+      }
+      try {
+        pending = Buffer.concat([pending, chunk]);
+        consume();
+      } catch (error) {
+        parseError = error;
+        child.kill();
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < MAX_GIT_ERROR_BYTES) {
+        stderr = Buffer.concat([stderr, chunk]).subarray(0, MAX_GIT_ERROR_BYTES);
+      }
+    });
+    child.on("error", (error) => {
+      spawnError = error;
+    });
+    child.on("close", (code, signal) => {
+      if (parseError !== null) {
+        reject(parseError);
+        return;
+      }
+      if (code !== 0 || spawnError !== null) {
+        reject(new Error(formatGitFailure(args, {
+          stderr,
+          status: code ?? signal,
+          error: spawnError,
+        })));
+        return;
+      }
+      try {
+        if (!verifiedPrefix) {
+          throw new Error("Git patch оказался пустым при непустом raw diff.");
+        }
+        emit(pending);
+        if (currentEntry + 1 !== entries.length) {
+          throw new Error(
+            `Raw diff и потоковый patch содержат разное число записей: ` +
+              `${entries.length}/${currentEntry + 1}.`,
+          );
+        }
+        resolve(Buffer.concat(output, outputBytes));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
 function readSafeTextSide(object, label) {
   if (!object?.blob) {
     return null;
@@ -837,6 +989,7 @@ function rebuiltTextPatch(entry, binaryCounterpart = false) {
   const newName = entry.newPath?.path ?? entry.oldPath?.path ?? "неизвестный-путь";
   const lines = [
     `diff --git a/${oldName} b/${newName}`,
+    "review-safe-reconstructed-patch true",
     `--- ${oldContent === null ? "/dev/null" : `a/${oldName}`}`,
     `+++ ${newContent === null ? "/dev/null" : `b/${newName}`}`,
   ];
@@ -852,14 +1005,23 @@ function rebuiltTextPatch(entry, binaryCounterpart = false) {
 }
 
 function sanitizePatch(patch, entries) {
-  const chunks = splitPatchChunks(patch, entries.length);
-  const safeChunks = chunks.map((chunk, index) => {
-    const entry = entries[index];
+  const rawEntries = entries.filter(usesRawPatch);
+  const chunks = splitPatchChunks(patch, rawEntries.length);
+  let rawIndex = 0;
+  const safeChunks = entries.map((entry) => {
+    if (usesRawPatch(entry)) {
+      const chunk = chunks[rawIndex];
+      rawIndex += 1;
+      return chunk;
+    }
     if (!entry.omitContent) {
-      return entry.rebuildTextPatch ? rebuiltTextPatch(entry) : chunk;
+      return rebuiltTextPatch(entry);
     }
     return entry.binaryTransition ? rebuiltTextPatch(entry, true) : omittedPatch(entry);
   });
+  if (rawIndex !== chunks.length) {
+    throw new Error("Не все записи raw patch были использованы при безопасной сборке.");
+  }
   const result = Buffer.concat(safeChunks);
   if (result.includes(0)) {
     throw new Error("Подготовленный diff всё ещё содержит NUL-байт.");
@@ -888,7 +1050,8 @@ export async function prepareCodexInput({
     );
   }
 
-  const rawPatch = runGitBuffer(
+  const { manifest, entries } = await buildBinaryManifest(baseSha, mergeBaseSha, headSha);
+  const rawPatch = await runGitFilteredPatch(
     [
       "-c",
       "core.quotePath=false",
@@ -898,14 +1061,17 @@ export async function prepareCodexInput({
       "--no-color",
       "--find-renames",
       "--full-index",
+      "--diff-algorithm=myers",
+      "--unified=3",
+      "--inter-hunk-context=0",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
       mergeBaseSha,
       headSha,
       "--",
     ],
-    MAX_PATCH_BYTES,
+    entries,
   );
-
-  const { manifest, entries } = await buildBinaryManifest(baseSha, mergeBaseSha, headSha);
   const safePatch = sanitizePatch(rawPatch, entries);
   mkdirSync(dirname(diffPath), { recursive: true });
   writeFileSync(diffPath, safePatch, { mode: 0o600 });

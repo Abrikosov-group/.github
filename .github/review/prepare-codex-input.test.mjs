@@ -106,6 +106,12 @@ test("бинарный payload заменяется точным детерми�
   git(repository, "init", "--quiet", "--initial-branch=main");
 
   write(repository, "src/layout.tsx", "export const answer = 41;\n");
+  write(
+    repository,
+    "src/old-name.ts",
+    `${Array.from({ length: 12 }, (_, index) => `export const stable${index} = ${index};`).join("\n")}\n` +
+      "export const renamed = 1;\n",
+  );
   write(repository, "assets/rename-old.bin", deterministicBinary(4096, "rename"));
   write(repository, "assets/delete.bin", deterministicBinary(3072, "delete"));
   write(repository, "assets/change.bin", deterministicBinary(2048, "change-before"));
@@ -115,6 +121,13 @@ test("бинарный payload заменяется точным детерми�
   git(repository, "switch", "--quiet", "--create", "feature");
 
   write(repository, "src/layout.tsx", "export const answer = 42;\n");
+  renameSync(join(repository, "src/old-name.ts"), join(repository, "src/new-name.ts"));
+  write(
+    repository,
+    "src/new-name.ts",
+    `${Array.from({ length: 12 }, (_, index) => `export const stable${index} = ${index};`).join("\n")}\n` +
+      "export const renamed = 2;\n",
+  );
   const fonts = [
     { path: "assets/fonts/manrope/Manrope.woff2", bytes: deterministicWoff2(110_000, "manrope") },
     { path: "assets/fonts/oswald/Oswald.woff2", bytes: deterministicWoff2(115_000, "oswald") },
@@ -165,6 +178,9 @@ test("бинарный payload заменяется точным детерми�
   const firstDirectory = join(root, "first");
   const secondDirectory = join(root, "second");
   const first = prepare(repository, baseSha, mergeBaseSha, headSha, firstDirectory);
+  git(repository, "config", "diff.algorithm", "histogram");
+  git(repository, "config", "diff.context", "9");
+  git(repository, "config", "diff.interHunkContext", "5");
   const second = prepare(repository, baseSha, mergeBaseSha, headSha, secondDirectory);
   const diffText = first.diff.toString("utf8");
   const manifest = JSON.parse(first.manifest.toString("utf8"));
@@ -176,6 +192,8 @@ test("бинарный payload заменяется точным детерми�
   assert.doesNotMatch(diffText, /GIT binary patch|^literal [0-9]+$/mu);
   assert.match(diffText, /-export const answer = 41;/u);
   assert.match(diffText, /\+export const answer = 42;/u);
+  assert.match(diffText, /diff --git a\/src\/old-name\.ts b\/src\/new-name\.ts/u);
+  assert.match(diffText, /\+export const renamed = 2;/u);
   assert.match(diffText, /Binary or non-representable content omitted/u);
   const publisherAnchors = collectDiffAnchors(diffText);
   assert.equal(publisherAnchors.get("src/layout.tsx")?.LEFT.has(1), true);
@@ -465,6 +483,11 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
       `${base64Payload.match(/.{1,76}/gu).join("\n")}\nordinary text after payload\n`,
   );
   write(repository, "encoded85.txt", `<~${"!!!!!".repeat(300)}~>\n`);
+  write(
+    repository,
+    "wrapped-base64.txt",
+    `Русский заголовок\n${base64Payload.match(/.{1,76}/gu).join("\n")}\nРусский хвост\n`,
+  );
   write(repository, "encoded.z85", `${"^!/*?&[]{}@%$#".repeat(100)}\n`);
   write(repository, "source-ascii85-like.js", `${"consta=true;".repeat(100)}\n`);
   write(repository, "source-z85-like.js", `${"consta=true:".repeat(100)}\n`);
@@ -479,8 +502,12 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
   const diff = prepared.diff.toString("utf8");
   const manifest = JSON.parse(prepared.manifest);
-  assert.equal(manifest.files.length, 6);
+  assert.equal(manifest.files.length, 7);
   assert.equal(manifest.files.find((file) => file.newPath === "encoded.txt").reason, "base64-content");
+  assert.equal(
+    manifest.files.find((file) => file.newPath === "wrapped-base64.txt").reason,
+    "base64-content",
+  );
   assert.equal(manifest.files.find((file) => file.newPath === "encoded85.txt").reason, "base85-content");
   assert.equal(manifest.files.find((file) => file.newPath === "encoded.z85").reason, "base85-content");
   assert.equal(manifest.files.some((file) => file.newPath === "source-ascii85-like.js"), false);
@@ -497,8 +524,35 @@ test("base64, base85 и ASCII-содержимое binary-типа не попа
   assert.match(diff, /consta=true:/u);
   assert.match(diff, /-старый безопасный текст/u);
   assert.match(diff, /\+новый безопасный текст/u);
+  assert.match(diff, /review-safe-reconstructed-patch true/u);
+  assert.equal(collectDiffAnchors(diff).has("forced.txt"), false);
   assert.doesNotMatch(diff, /ASCII-only fixture/u);
   assert.doesNotMatch(diff, /danger<marker>/u);
   assert.doesNotMatch(diff, /danger\u200bmarker/u);
   assert.match(diff, /-до кодирования/u);
+});
+
+test("кодированный файл больше лимита raw patch исключается до построения diff", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "prepare-codex-large-encoded-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  git(repository, "init", "--quiet", "--initial-branch=main");
+  write(repository, "README.md", "база\n");
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "База");
+  const mergeBaseSha = git(repository, "rev-parse", "HEAD");
+  git(repository, "switch", "--quiet", "--create", "feature");
+  write(repository, "huge-encoded.txt", Buffer.alloc(65 * 1024 * 1024, "A"));
+  git(repository, "add", "--all");
+  git(repository, "commit", "--quiet", "-m", "Большой кодированный файл");
+  const headSha = git(repository, "rev-parse", "HEAD");
+
+  const prepared = prepare(repository, mergeBaseSha, mergeBaseSha, headSha, join(root, "out"));
+  const manifest = JSON.parse(prepared.manifest);
+  assert.equal(manifest.files.length, 1);
+  assert.equal(manifest.files[0].newPath, "huge-encoded.txt");
+  assert.equal(manifest.files[0].reason, "base64-content");
+  assert.ok(prepared.diff.length < 1024);
+  assert.doesNotMatch(prepared.diff.toString("utf8"), /A{128}/u);
 });

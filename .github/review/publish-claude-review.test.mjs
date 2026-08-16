@@ -306,6 +306,24 @@ test("неизвестный путь безопасно классифицир�
   assert.deepEqual(partition.unanchored, [finding]);
 });
 
+test("реконструированный безопасный patch публикует замечания только в итоге ревью", () => {
+  const finding = validReview().findings[0];
+  const reconstructedDiff = [
+    "diff --git a/src/example.ts b/src/example.ts",
+    "review-safe-reconstructed-patch true",
+    "--- a/src/example.ts",
+    "+++ b/src/example.ts",
+    "@@ -1,12 +1,12 @@",
+    "-old",
+    "+new",
+  ].join("\n");
+
+  const partition = partitionFindingAnchors([finding], reconstructedDiff);
+
+  assert.deepEqual(partition.anchored, []);
+  assert.deepEqual(partition.unanchored, [finding]);
+});
+
 test("доверяет ровно одному корректному маркеру метрик", () => {
   assert.equal(trustedReviewBlockingFindings({ body: findingsMarker({ p1: 2, p2: 1 }) }), 3);
   assert.equal(trustedReviewBlockingFindings({ body: "legacy review" }), null);
