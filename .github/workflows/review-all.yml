@@ -834,6 +834,7 @@ jobs:
         with:
           name: codex-review-input
           path: .review-input/codex
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
