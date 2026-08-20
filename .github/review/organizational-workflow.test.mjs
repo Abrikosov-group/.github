@@ -608,7 +608,7 @@ test("обе модели получают один безопасный diff и
   assert.doesNotMatch(workflow, /git diff[^\n]*> "\$\{GITHUB_WORKSPACE\}\/\.review-input/u);
 });
 
-test("публикация Claude не запускается без созданного input artifact", () => {
+test("публикация Claude получает вход и результат только через artifacts", () => {
   const analyzeJob = extractJob(workflow, "analyze-claude");
   const publishJob = extractJob(workflow, "publish-claude");
   assert.match(
@@ -620,13 +620,28 @@ test("публикация Claude не запускается без созда�
     /name: claude-review-input\n\s+path: \.review-input\n\s+include-hidden-files: true/u,
   );
   assert.match(
+    analyzeJob,
+    /- name: Передать результат Claude доверенному издателю[\s\S]*?name: claude-review-output[\s\S]*?\/output\/review\.json/u,
+  );
+  assert.doesNotMatch(analyzeJob, /review_json: \$\{\{ steps\.claude\.outputs\.structured_output \}\}/u);
+  assert.match(
     publishJob,
     /if: needs\.analyze-claude\.outputs\.review_needed == 'true'/u,
   );
   assert.match(publishJob, /name: claude-review-input/u);
+  assert.match(publishJob, /name: claude-review-output/u);
+  assert.match(
+    publishJob,
+    /REVIEW_JSON_FILE: \$\{\{ github\.workspace \}\}\/\.review-output\/claude\/review\.json/u,
+  );
+  assert.doesNotMatch(publishJob, /REVIEW_JSON: \$\{\{ needs\.analyze-claude\.outputs\.review_json \}\}/u);
   assert.ok(
     analyzeJob.indexOf("Передать безопасный вход издателю") <
       analyzeJob.indexOf("Выполнить изолированное review-only ревью"),
+  );
+  assert.ok(
+    analyzeJob.indexOf("Выполнить изолированное review-only ревью") <
+      analyzeJob.indexOf("Передать результат Claude доверенному издателю"),
   );
 });
 

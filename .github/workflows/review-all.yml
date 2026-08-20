@@ -1037,7 +1037,6 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
-      review_json: ${{ steps.claude.outputs.structured_output }}
       review_needed: ${{ steps.existing.outputs.needed }}
       blocking_findings: ${{ steps.existing.outputs.blocking_findings }}
       binary_files: ${{ steps.input.outputs.binary_files }}
@@ -1302,6 +1301,43 @@ jobs:
             --disallowedTools "Agent,Task,TaskOutput,Glob,Grep,Bash,Edit,Write,MultiEdit,NotebookEdit,NotebookEditCell,Replace,WebFetch,WebSearch"
             --json-schema '{"type":"object","properties":{"findings":{"type":"array","maxItems":20,"items":{"type":"object","properties":{"priority":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string","minLength":1,"maxLength":512},"line":{"type":"integer","minimum":1,"maximum":10000000},"side":{"type":"string","enum":["LEFT","RIGHT"]},"title":{"type":"string","minLength":1,"maxLength":160},"body":{"type":"string","minLength":1,"maxLength":2000}},"required":["priority","path","line","side","title","body"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
 
+      - name: Сохранить результат Claude для доверенного издателя
+        if: steps.existing.outputs.needed == 'true'
+        shell: bash
+        env:
+          REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
+          REVIEW_ROOT: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          output_dir="${REVIEW_ROOT}/output"
+          mkdir -p "${output_dir}"
+          printf '%s\n' "${REVIEW_JSON}" > "${output_dir}/review.json"
+          jq -e '
+            (keys == ["findings"]) and
+            (.findings | type == "array" and length <= 20)
+          ' "${output_dir}/review.json" > /dev/null
+
+      - name: Передать результат Claude доверенному издателю
+        if: steps.existing.outputs.needed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: claude-review-output
+          path: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/output/review.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Удалить временный результат Claude с Runner
+        if: always()
+        shell: bash
+        env:
+          REVIEW_ROOT: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ -d "${REVIEW_ROOT}" && "${REVIEW_ROOT}" == "${RUNNER_TEMP}"/claude-review-* ]]; then
+            find "${REVIEW_ROOT}" -type f -delete
+            find "${REVIEW_ROOT}" -depth -type d -empty -delete
+          fi
+
   publish-claude:
     name: Опубликовать проверенное ревью Claude
     needs: [context, start-status, analyze-claude]
@@ -1358,6 +1394,12 @@ jobs:
         with:
           name: claude-review-input
           path: .review-input/claude
+
+      - name: Получить результат Claude
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: claude-review-output
+          path: .review-output/claude
 
       - name: Независимо проверить вход Claude
         shell: bash
@@ -1434,7 +1476,7 @@ jobs:
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           REVIEW_MODEL: claude-sonnet-5
-          REVIEW_JSON: ${{ needs.analyze-claude.outputs.review_json }}
+          REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/claude/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/trusted/pull-request.diff
           BINARY_MANIFEST_PATH: ${{ github.workspace }}/.review-input/trusted/binary-manifest.json
           FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
