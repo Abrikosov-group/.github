@@ -1631,9 +1631,46 @@ jobs:
                "${current_head_sha}" == "${HEAD_SHA}" ]]
           }
 
+          marker='<!-- organizational-review-status -->'
+          head_short="${HEAD_SHA:0:12}"
+          mark_result_stale() {
+            stale_body="$(cat <<EOF
+          ${marker}
+          ### ❌ Результат ИИ-ревью устарел
+
+          Проверенный снимок \`${head_short}\` больше не соответствует открытому Ready PR с ожидаемыми Base/Head.
+
+          Результат этого запуска нельзя использовать как подтверждение готовности.
+
+          [Открыть журнал выполнения](${RUN_URL})
+          EOF
+            )"
+            compensation_failed=false
+            if ! gh api --method PATCH \
+              "repos/${REPOSITORY}/issues/comments/${STATUS_COMMENT_ID}" \
+              --raw-field body="${stale_body}" > /dev/null; then
+              compensation_failed=true
+            fi
+            if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]] &&
+              ! gh api --method POST \
+                "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+                --raw-field state='failure' \
+                --raw-field context="${REVIEW_GATE_CONTEXT}" \
+                --raw-field description='Снимок PR изменился во время финализации' \
+                --raw-field target_url="${RUN_URL}" > /dev/null; then
+              compensation_failed=true
+            fi
+            if [[ "${compensation_failed}" == "true" ]]; then
+              echo "::error::Снимок PR изменился, а fail-closed компенсация завершилась ошибкой"
+            else
+              echo "::error::Снимок PR изменился во время финализации; результат помечен устаревшим"
+            fi
+          }
+
           if ! pr_snapshot_is_current; then
-            echo "Статус не обновляется: PR закрыт, переведён в Draft либо уже содержит другой Base/Head ${current_base_sha}/${current_head_sha}"
-            exit 0
+            echo "Снимок PR изменился до финализации: ${current_base_sha}/${current_head_sha}"
+            mark_result_stale
+            exit 1
           fi
 
           codex_ok=false
@@ -1725,8 +1762,6 @@ jobs:
             heading='### ❌ ИИ-ревью требует внимания'
           fi
 
-          marker='<!-- organizational-review-status -->'
-          head_short="${HEAD_SHA:0:12}"
           body="$(cat <<EOF
           ${marker}
           ${heading}
@@ -1745,44 +1780,10 @@ jobs:
           EOF
           )"
 
-          mark_result_stale() {
-            stale_body="$(cat <<EOF
-          ${marker}
-          ### ❌ Результат ИИ-ревью устарел
-
-          Проверенный снимок \`${head_short}\` больше не соответствует открытому Ready PR с ожидаемыми Base/Head.
-
-          Результат этого запуска нельзя использовать как подтверждение готовности.
-
-          [Открыть журнал выполнения](${RUN_URL})
-          EOF
-            )"
-            compensation_failed=false
-            if ! gh api --method PATCH \
-              "repos/${REPOSITORY}/issues/comments/${STATUS_COMMENT_ID}" \
-              --raw-field body="${stale_body}" > /dev/null; then
-              compensation_failed=true
-            fi
-            if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]] &&
-              ! gh api --method POST \
-                "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
-                --raw-field state='failure' \
-                --raw-field context="${REVIEW_GATE_CONTEXT}" \
-                --raw-field description='Снимок PR изменился во время финализации' \
-                --raw-field target_url="${RUN_URL}" > /dev/null; then
-              compensation_failed=true
-            fi
-            if [[ "${compensation_failed}" == "true" ]]; then
-              echo "::error::Снимок PR изменился, а fail-closed компенсация завершилась ошибкой"
-            else
-              echo "::error::Снимок PR изменился во время финализации; результат помечен устаревшим"
-            fi
-            return 1
-          }
-
           if ! pr_snapshot_is_current; then
-            echo "Статус не обновляется: снимок PR изменился непосредственно перед публикацией"
-            exit 0
+            echo "Снимок PR изменился непосредственно перед публикацией"
+            mark_result_stale
+            exit 1
           fi
 
           gh api --method PATCH \

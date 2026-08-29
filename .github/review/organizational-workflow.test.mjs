@@ -669,7 +669,7 @@ test("перед каждой моделью повторно требует о�
   }
 });
 
-test("не публикует итоговый статус закрытого или возвращённого в Draft PR", () => {
+test("помечает итог устаревшим для закрытого или возвращённого в Draft PR", () => {
   for (const overrides of [
     { MOCK_PR_STATE: "closed" },
     { MOCK_PR_DRAFT: "true" },
@@ -683,16 +683,21 @@ test("не публикует итоговый статус закрытого �
         STATUS_COMMENT_ID: "99",
         BASE_SHA: "a".repeat(40),
         HEAD_SHA: "b".repeat(40),
+        MODE: "all",
+        RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+        REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
         ...overrides,
       },
     });
-    assert.equal(finish.status, 0, finish.stderr);
-    assert.match(finish.stdout, /Статус не обновляется: PR закрыт, переведён в Draft/u);
-    assert.doesNotMatch(finish.ghLog, /--method PATCH|--raw-field state=/u);
+    assert.notEqual(finish.status, 0);
+    assert.match(finish.stdout, /результат помечен устаревшим/u);
+    assert.match(finish.ghLog, /Результат ИИ-ревью устарел/u);
+    assert.match(finish.ghLog, /--raw-field state=failure/u);
+    assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
   }
 });
 
-test("не публикует итоговый статус после изменения Base SHA", () => {
+test("помечает итог устаревшим после изменения Base SHA", () => {
   const finish = executeRunScript({
     stepName: "Показать результат обоих ревьюеров",
     ghMock: finishStatusGhMock,
@@ -702,12 +707,17 @@ test("не публикует итоговый статус после изме�
       STATUS_COMMENT_ID: "99",
       BASE_SHA: "a".repeat(40),
       HEAD_SHA: "b".repeat(40),
+      MODE: "all",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
       MOCK_CURRENT_BASE_SHA: "c".repeat(40),
     },
   });
-  assert.equal(finish.status, 0, finish.stderr);
-  assert.match(finish.stdout, /уже содержит другой Base\/Head/u);
-  assert.doesNotMatch(finish.ghLog, /--method PATCH|--raw-field state=/u);
+  assert.notEqual(finish.status, 0);
+  assert.match(finish.stdout, /результат помечен устаревшим/u);
+  assert.match(finish.ghLog, /Результат ИИ-ревью устарел/u);
+  assert.match(finish.ghLog, /--raw-field state=failure/u);
+  assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
 });
 
 test("компенсирует результат, если PR закрылся после публикации комментария", () => {
@@ -1946,7 +1956,8 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(finishStatus, /statuses\/\$\{HEAD_SHA\}/u);
   assert.match(finishStatus, /current_base_sha/u);
   assert.match(finishStatus, /current_head_sha/u);
-  assert.match(finishStatus, /Статус не обновляется: PR закрыт, переведён в Draft/u);
+  assert.match(finishStatus, /Снимок PR изменился до финализации/u);
+  assert.match(finishStatus, /mark_result_stale/u);
   assert.match(finishStatus, /--method PATCH/u);
   assert.match(workflow, /needs: \[context, start-status\]/u);
   assert.ok(workflow.indexOf("  start-status:") < workflow.indexOf("  prepare-codex:"));
