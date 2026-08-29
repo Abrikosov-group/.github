@@ -201,7 +201,28 @@ const finishStatusGhMock = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "\${MOCK_GH_LOG}"
 if [[ "$*" == *"/pulls/17"* ]]; then
-  printf '%s\n' "\${HEAD_SHA}"
+  count_file="\${RUNNER_TEMP}/finish-pr-read-count"
+  read_count=0
+  [[ ! -f "\${count_file}" ]] || read_count="$(<"\${count_file}")"
+  read_count=$((read_count + 1))
+  printf '%s\n' "\${read_count}" > "\${count_file}"
+  changed=false
+  if [[ -n "\${MOCK_PR_CHANGE_AFTER_READS:-}" &&
+        "\${read_count}" -gt "\${MOCK_PR_CHANGE_AFTER_READS}" ]]; then
+    changed=true
+  fi
+  state="\${MOCK_PR_STATE:-open}"
+  draft="\${MOCK_PR_DRAFT:-false}"
+  base_sha="\${MOCK_CURRENT_BASE_SHA:-\${BASE_SHA}}"
+  head_sha="\${MOCK_CURRENT_HEAD_SHA:-\${HEAD_SHA}}"
+  if [[ "\${changed}" == "true" ]]; then
+    state="\${MOCK_CHANGED_PR_STATE:-closed}"
+    draft="\${MOCK_CHANGED_PR_DRAFT:-false}"
+    base_sha="\${MOCK_CHANGED_BASE_SHA:-\${base_sha}}"
+    head_sha="\${MOCK_CHANGED_HEAD_SHA:-\${head_sha}}"
+  fi
+  printf '{"state":"%s","draft":%s,"base":{"sha":"%s"},"head":{"sha":"%s"}}\n' \
+    "\${state}" "\${draft}" "\${base_sha}" "\${head_sha}"
 elif [[ "$*" == *"--method PATCH"* && "$*" == *"/issues/comments/99"* ]]; then
   printf '{}\n'
 elif [[ "$*" == *"--method POST"* && "$*" == *"/statuses/"* ]]; then
@@ -543,16 +564,20 @@ test("центральный caller разрешает status-права reusabl
 
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
   const codexJob = workflow.match(/\n  analyze-codex:[\s\S]*?(?=\n  publish-codex:)/u)?.[0];
+  const modelStep = codexJob?.match(
+    /\n      - name: Выполнить изолированное ревью Spark без инструментов[\s\S]*?(?=\n      - name:)/u,
+  )?.[0];
 
   assert.ok(codexJob);
-  assert.match(codexJob, /permissions: \{\}/u);
-  assert.match(codexJob, /env -i/u);
-  assert.match(codexJob, /--ignore-user-config/u);
-  assert.match(codexJob, /--ignore-rules/u);
-  assert.match(codexJob, /--disable shell_tool/u);
-  assert.match(codexJob, /--disable plugins/u);
+  assert.ok(modelStep);
+  assert.match(codexJob, /permissions:\n\s+pull-requests: read/u);
+  assert.match(modelStep, /env -i/u);
+  assert.match(modelStep, /--ignore-user-config/u);
+  assert.match(modelStep, /--ignore-rules/u);
+  assert.match(modelStep, /--disable shell_tool/u);
+  assert.match(modelStep, /--disable plugins/u);
   assert.doesNotMatch(codexJob, /actions\/checkout/u);
-  assert.doesNotMatch(codexJob, /GH_TOKEN|GITHUB_TOKEN/u);
+  assert.doesNotMatch(modelStep, /GH_TOKEN|GITHUB_TOKEN/u);
 });
 
 test("Codex публикуется только после схемы и доверенного издателя", () => {
@@ -590,6 +615,170 @@ test("Claude не получает инструменты записи, shell и
   assert.match(workflow, /Не включай HTML-теги, HTML-комментарии или служебные маркеры/u);
   assert.equal(workflow.split("фактические форматирующие Unicode-символы").length - 1, 2);
   assert.doesNotMatch(extractJob(workflow, "analyze-claude"), /path: pr-head|--add-dir|Read\(\.\/pr-head/u);
+});
+
+test("перед каждой моделью повторно требует открытый Ready PR точного снимка", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const guards = [
+    {
+      stepName: "Повторно проверить PR перед запуском Codex",
+      jobId: "analyze-codex",
+      modelStep: "Выполнить изолированное ревью Spark без инструментов",
+    },
+    {
+      stepName: "Повторно проверить PR перед запуском Claude",
+      jobId: "analyze-claude",
+      modelStep: "Выполнить изолированное review-only ревью",
+    },
+  ];
+
+  for (const { stepName, jobId, modelStep } of guards) {
+    const job = extractJob(workflow, jobId);
+    assert.ok(job.indexOf(stepName) < job.indexOf(modelStep));
+    assert.match(job, /pull-requests: read/u);
+
+    const commonEnv = {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      BASE_SHA: baseSha,
+      HEAD_SHA: headSha,
+    };
+    const open = executeRunScript({
+      stepName,
+      ghMock: markerGhMock,
+      env: {
+        ...commonEnv,
+        MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+      },
+    });
+    assert.equal(open.status, 0, open.stderr);
+
+    for (const unavailable of [
+      prFixture({ baseSha, headSha, state: "closed" }),
+      prFixture({ baseSha, headSha, draft: true }),
+    ]) {
+      const rejected = executeRunScript({
+        stepName,
+        ghMock: markerGhMock,
+        env: { ...commonEnv, MOCK_PR_JSON: unavailable },
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stdout, /PR закрыт, переведён в Draft/u);
+    }
+  }
+});
+
+test("не публикует итоговый статус закрытого или возвращённого в Draft PR", () => {
+  for (const overrides of [
+    { MOCK_PR_STATE: "closed" },
+    { MOCK_PR_DRAFT: "true" },
+  ]) {
+    const finish = executeRunScript({
+      stepName: "Показать результат обоих ревьюеров",
+      ghMock: finishStatusGhMock,
+      env: {
+        REPOSITORY: "Abrikosov-group/project",
+        PR_NUMBER: "17",
+        STATUS_COMMENT_ID: "99",
+        BASE_SHA: "a".repeat(40),
+        HEAD_SHA: "b".repeat(40),
+        ...overrides,
+      },
+    });
+    assert.equal(finish.status, 0, finish.stderr);
+    assert.match(finish.stdout, /Статус не обновляется: PR закрыт, переведён в Draft/u);
+    assert.doesNotMatch(finish.ghLog, /--method PATCH|--raw-field state=/u);
+  }
+});
+
+test("не публикует итоговый статус после изменения Base SHA", () => {
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      BASE_SHA: "a".repeat(40),
+      HEAD_SHA: "b".repeat(40),
+      MOCK_CURRENT_BASE_SHA: "c".repeat(40),
+    },
+  });
+  assert.equal(finish.status, 0, finish.stderr);
+  assert.match(finish.stdout, /уже содержит другой Base\/Head/u);
+  assert.doesNotMatch(finish.ghLog, /--method PATCH|--raw-field state=/u);
+});
+
+test("компенсирует результат, если PR закрылся после публикации комментария", () => {
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      BASE_SHA: "a".repeat(40),
+      HEAD_SHA: "b".repeat(40),
+      MODE: "all",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
+      CODEX_PREPARE_RESULT: "success",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "0",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "false",
+      CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      MOCK_PR_CHANGE_AFTER_READS: "2",
+    },
+  });
+  assert.notEqual(finish.status, 0);
+  assert.match(finish.stdout, /результат помечен устаревшим/u);
+  assert.match(finish.ghLog, /Двойное ИИ-ревью завершено без блокеров/u);
+  assert.match(finish.ghLog, /Результат ИИ-ревью устарел/u);
+  assert.match(finish.ghLog, /--raw-field state=failure/u);
+  assert.doesNotMatch(finish.ghLog, /--raw-field state=success/u);
+});
+
+test("компенсирует зелёный gate, если PR закрылся сразу после его публикации", () => {
+  const finish = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      BASE_SHA: "a".repeat(40),
+      HEAD_SHA: "b".repeat(40),
+      MODE: "all",
+      RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+      REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность",
+      CODEX_PREPARE_RESULT: "success",
+      CODEX_REVIEW_NEEDED: "false",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "0",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "false",
+      CLAUDE_PUBLISH_RESULT: "skipped",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+      CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      MOCK_PR_CHANGE_AFTER_READS: "3",
+    },
+  });
+  assert.notEqual(finish.status, 0);
+  assert.match(finish.stdout, /результат помечен устаревшим/u);
+  const successIndex = finish.ghLog.indexOf("--raw-field state=success");
+  const failureIndex = finish.ghLog.lastIndexOf("--raw-field state=failure");
+  assert.ok(successIndex >= 0, finish.ghLog);
+  assert.ok(failureIndex > successIndex, finish.ghLog);
+  assert.match(finish.ghLog, /Результат ИИ-ревью устарел/u);
 });
 
 test("обе модели получают один безопасный diff и exact binary manifest без ручного гейта", () => {
@@ -1232,6 +1421,7 @@ test("[11] два существующих маркера не запускаю�
       REPOSITORY: "Abrikosov-group/project",
       PR_NUMBER: "17",
       STATUS_COMMENT_ID: "99",
+      BASE_SHA: baseSha,
       HEAD_SHA: headSha,
       MODE: "all",
       RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
@@ -1302,6 +1492,7 @@ test("повторно использованное ревью с P0–P2 не �
       REPOSITORY: "Abrikosov-group/project",
       PR_NUMBER: "17",
       STATUS_COMMENT_ID: "99",
+      BASE_SHA: baseSha,
       HEAD_SHA: headSha,
       MODE: "all",
       RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
@@ -1334,6 +1525,7 @@ test("ручное ревью Claude с P0–P2 не показывает зел
       REPOSITORY: "Abrikosov-group/project",
       PR_NUMBER: "17",
       STATUS_COMMENT_ID: "99",
+      BASE_SHA: "a".repeat(40),
       HEAD_SHA: headSha,
       MODE: "claude",
       RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
@@ -1370,6 +1562,7 @@ test("список бинарных файлов остаётся информа
       REPOSITORY: "Abrikosov-group/project",
       PR_NUMBER: "17",
       STATUS_COMMENT_ID: "99",
+      BASE_SHA: "a".repeat(40),
       HEAD_SHA: headSha,
       MODE: "all",
       RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
@@ -1751,8 +1944,9 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(finishStatus, /ИИ-ревью требует внимания/u);
   assert.match(finishStatus, /Блокирующих замечаний P0–P2/u);
   assert.match(finishStatus, /statuses\/\$\{HEAD_SHA\}/u);
+  assert.match(finishStatus, /current_base_sha/u);
   assert.match(finishStatus, /current_head_sha/u);
-  assert.match(finishStatus, /Статус не обновляется: PR уже содержит более новый commit/u);
+  assert.match(finishStatus, /Статус не обновляется: PR закрыт, переведён в Draft/u);
   assert.match(finishStatus, /--method PATCH/u);
   assert.match(workflow, /needs: \[context, start-status\]/u);
   assert.ok(workflow.indexOf("  start-status:") < workflow.indexOf("  prepare-codex:"));

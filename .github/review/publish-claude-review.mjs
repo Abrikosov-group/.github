@@ -660,7 +660,10 @@ async function currentPullRequest({ repository, pullNumber, token }) {
 }
 
 function pullRequestMatches(pullRequest, baseSha, headSha) {
-  return pullRequest?.base?.sha === baseSha && pullRequest?.head?.sha === headSha;
+  return pullRequest?.state === "open" &&
+    pullRequest?.draft === false &&
+    pullRequest?.base?.sha === baseSha &&
+    pullRequest?.head?.sha === headSha;
 }
 
 export async function reviewNeeded({
@@ -742,7 +745,7 @@ export async function main() {
   const marker = reviewMarker(baseSha, headSha, reviewModel);
   const initialPullRequest = await currentPullRequest({ repository, pullNumber, token });
   if (!pullRequestMatches(initialPullRequest, baseSha, headSha)) {
-    console.log("Base или Head PR уже изменился; устаревшее ревью не опубликовано.");
+    console.log("PR закрыт, переведён в Draft либо его Base или Head уже изменился; ревью не опубликовано.");
     return;
   }
 
@@ -778,7 +781,7 @@ export async function main() {
 
   const latestPullRequest = await currentPullRequest({ repository, pullNumber, token });
   if (!pullRequestMatches(latestPullRequest, baseSha, headSha)) {
-    console.log("Base или Head PR изменился во время проверки; устаревшее ревью не опубликовано.");
+    console.log("PR закрыт, переведён в Draft либо его Base или Head изменился во время проверки; ревью не опубликовано.");
     return;
   }
 
@@ -804,9 +807,9 @@ export async function main() {
       body: { body: buildStaleReviewBody(baseSha, headSha, reviewModel) },
       token,
     });
-    console.log(`Ревью ${result.html_url} помечено устаревшим после изменения Base или Head SHA.`);
+    console.log(`Ревью ${result.html_url} помечено устаревшим после закрытия PR, перевода в Draft либо изменения Base или Head SHA.`);
     throw new Error(
-      "Base или Head PR изменился после публикации; устаревшее ревью не считается успешно опубликованным.",
+      "PR закрыт, переведён в Draft либо его Base или Head изменился после публикации; устаревшее ревью не считается успешно опубликованным.",
     );
   }
 

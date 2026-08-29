@@ -627,9 +627,11 @@ jobs:
           fi
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::Base или Head PR изменился до подготовки Codex"
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился до подготовки Codex"
             exit 1
           fi
 
@@ -814,9 +816,11 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
+          if [[ "$(jq -er '.state' <<< "${latest_pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${latest_pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${latest_pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::Base или Head PR изменился во время подготовки Codex"
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился во время подготовки Codex"
             exit 1
           fi
 
@@ -838,7 +842,8 @@ jobs:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.codex_runner_label }}
     timeout-minutes: 25
-    permissions: {}
+    permissions:
+      pull-requests: read
 
     steps:
       - name: Проверить доверенный Runner Codex
@@ -865,6 +870,26 @@ jobs:
           command -v codex > /dev/null
           codex --version
           codex login status
+
+      - name: Повторно проверить PR перед запуском Codex
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
+                "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился перед запуском Codex"
+            exit 1
+          fi
 
       - name: Выполнить изолированное ревью Spark без инструментов
         shell: bash
@@ -1100,9 +1125,11 @@ jobs:
           set -euo pipefail
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::Base или Head PR изменился до получения diff"
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился до получения diff"
             exit 1
           fi
 
@@ -1167,9 +1194,11 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
+          if [[ "$(jq -er '.state' <<< "${latest_pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${latest_pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${latest_pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::Base или Head PR изменился во время получения diff"
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился во время получения diff"
             exit 1
           fi
 
@@ -1248,6 +1277,27 @@ jobs:
           set -euo pipefail
           if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
             echo "::error::Не настроен организационный секрет CLAUDE_CODE_OAUTH_TOKEN"
+            exit 1
+          fi
+
+      - name: Повторно проверить PR перед запуском Claude
+        if: steps.existing.outputs.needed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
+                "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился перед запуском Claude"
             exit 1
           fi
 
@@ -1418,9 +1468,11 @@ jobs:
           fi
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
+          if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::Base или Head PR изменился до независимой проверки входа Claude"
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился до независимой проверки входа Claude"
             exit 1
           fi
 
@@ -1461,9 +1513,11 @@ jobs:
           done
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
-          if [[ "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
+          if [[ "$(jq -er '.state' <<< "${latest_pr_json}")" != "open" ||
+                "$(jq -er '.draft | tostring' <<< "${latest_pr_json}")" != "false" ||
+                "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${latest_pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::Base или Head PR изменился во время независимой проверки входа Claude"
+            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился во время независимой проверки входа Claude"
             exit 1
           fi
 
@@ -1512,6 +1566,7 @@ jobs:
       REPOSITORY: ${{ inputs.repository }}
       PR_NUMBER: ${{ inputs.pr_number }}
       STATUS_COMMENT_ID: ${{ needs.start-status.outputs.comment_id }}
+      BASE_SHA: ${{ needs.context.outputs.base_sha }}
       HEAD_SHA: ${{ needs.context.outputs.head_sha }}
       MODE: ${{ needs.context.outputs.mode }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1566,11 +1621,18 @@ jobs:
             exit 1
           fi
 
-          current_head_sha="$(gh api \
-            "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
-            --jq '.head.sha')"
-          if [[ "${current_head_sha}" != "${HEAD_SHA}" ]]; then
-            echo "Статус не обновляется: PR уже содержит более новый commit ${current_head_sha}"
+          pr_snapshot_is_current() {
+            current_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
+            current_base_sha="$(jq -er '.base.sha' <<< "${current_pr_json}")"
+            current_head_sha="$(jq -er '.head.sha' <<< "${current_pr_json}")"
+            [[ "$(jq -er '.state' <<< "${current_pr_json}")" == "open" &&
+               "$(jq -er '.draft | tostring' <<< "${current_pr_json}")" == "false" &&
+               "${current_base_sha}" == "${BASE_SHA}" &&
+               "${current_head_sha}" == "${HEAD_SHA}" ]]
+          }
+
+          if ! pr_snapshot_is_current; then
+            echo "Статус не обновляется: PR закрыт, переведён в Draft либо уже содержит другой Base/Head ${current_base_sha}/${current_head_sha}"
             exit 0
           fi
 
@@ -1683,9 +1745,54 @@ jobs:
           EOF
           )"
 
+          mark_result_stale() {
+            stale_body="$(cat <<EOF
+          ${marker}
+          ### ❌ Результат ИИ-ревью устарел
+
+          Проверенный снимок \`${head_short}\` больше не соответствует открытому Ready PR с ожидаемыми Base/Head.
+
+          Результат этого запуска нельзя использовать как подтверждение готовности.
+
+          [Открыть журнал выполнения](${RUN_URL})
+          EOF
+            )"
+            compensation_failed=false
+            if ! gh api --method PATCH \
+              "repos/${REPOSITORY}/issues/comments/${STATUS_COMMENT_ID}" \
+              --raw-field body="${stale_body}" > /dev/null; then
+              compensation_failed=true
+            fi
+            if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]] &&
+              ! gh api --method POST \
+                "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+                --raw-field state='failure' \
+                --raw-field context="${REVIEW_GATE_CONTEXT}" \
+                --raw-field description='Снимок PR изменился во время финализации' \
+                --raw-field target_url="${RUN_URL}" > /dev/null; then
+              compensation_failed=true
+            fi
+            if [[ "${compensation_failed}" == "true" ]]; then
+              echo "::error::Снимок PR изменился, а fail-closed компенсация завершилась ошибкой"
+            else
+              echo "::error::Снимок PR изменился во время финализации; результат помечен устаревшим"
+            fi
+            return 1
+          }
+
+          if ! pr_snapshot_is_current; then
+            echo "Статус не обновляется: снимок PR изменился непосредственно перед публикацией"
+            exit 0
+          fi
+
           gh api --method PATCH \
             "repos/${REPOSITORY}/issues/comments/${STATUS_COMMENT_ID}" \
             --raw-field body="${body}" > /dev/null
+
+          if ! pr_snapshot_is_current; then
+            mark_result_stale
+            exit 1
+          fi
 
           if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
             if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" &&
@@ -1706,4 +1813,9 @@ jobs:
               --raw-field context="${REVIEW_GATE_CONTEXT}" \
               --raw-field description="${gate_description}" \
               --raw-field target_url="${RUN_URL}" > /dev/null
+          fi
+
+          if ! pr_snapshot_is_current; then
+            mark_result_stale
+            exit 1
           fi
