@@ -28,6 +28,20 @@ const STANDARD_MODEL = "claude-sonnet-5";
 const DEEP_MODEL = "claude-opus-5";
 const SPARK_MODEL = "gpt-5.3-codex-spark";
 
+function pullRequestFixture({
+  baseSha = BASE_SHA,
+  headSha = HEAD_SHA,
+  state = "open",
+  draft = false,
+} = {}) {
+  return {
+    state,
+    draft,
+    base: { sha: baseSha },
+    head: { sha: headSha },
+  };
+}
+
 function findingsMarker({ p0 = 0, p1 = 0, p2 = 0 } = {}) {
   return `<!-- review-findings:P0=${p0};P1=${p1};P2=${p2} -->`;
 }
@@ -453,7 +467,7 @@ test("читает структурированный результат Codex �
   const reviewPath = join(temporaryDirectory, "review.json");
   writeFileSync(reviewPath, JSON.stringify({ findings: [] }));
   const calls = [];
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
 
   try {
     await runMainWithFetch(async (url, options) => {
@@ -490,7 +504,7 @@ test("до запуска Claude пропускает дубликат и уст
     reviewModel: STANDARD_MODEL,
     token: "test-token-without-production-access",
   };
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
   const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
 
   const duplicateCalls = [];
@@ -519,10 +533,23 @@ test("до запуска Claude пропускает дубликат и уст
   const staleCalls = [];
   const staleNeeded = await withFetch(async (url) => {
     staleCalls.push(String(url));
-    return jsonResponse({ base: { sha: BASE_SHA }, head: { sha: "3".repeat(40) } });
+    return jsonResponse(pullRequestFixture({ headSha: "3".repeat(40) }));
   }, () => reviewNeeded(context));
   assert.equal(staleNeeded, false);
   assert.equal(staleCalls.length, 1);
+
+  for (const unavailablePullRequest of [
+    pullRequestFixture({ state: "closed" }),
+    pullRequestFixture({ draft: true }),
+  ]) {
+    const unavailableCalls = [];
+    const unavailableNeeded = await withFetch(async (url) => {
+      unavailableCalls.push(String(url));
+      return jsonResponse(unavailablePullRequest);
+    }, () => reviewNeeded(context));
+    assert.equal(unavailableNeeded, false);
+    assert.equal(unavailableCalls.length, 1);
+  }
 
   const appDuplicateCalls = [];
   const appDuplicateNeeded = await withFetch(async (url) => {
@@ -573,7 +600,7 @@ test("до запуска Claude пропускает дубликат и уст
 
 test("публикует итог и comments одним API-запросом после тройной проверки SHA", async () => {
   const calls = [];
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
 
   await runMainWithFetch(async (url, options) => {
     calls.push({ url: String(url), options });
@@ -597,6 +624,38 @@ test("публикует итог и comments одним API-запросом п
   assert.ok(payload.body.startsWith(reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL)));
 });
 
+test("не публикует результат, если PR закрыт или возвращён в Draft", async () => {
+  for (const unavailablePullRequest of [
+    pullRequestFixture({ state: "closed" }),
+    pullRequestFixture({ draft: true }),
+  ]) {
+    const calls = [];
+    await runMainWithFetch(async (url, options) => {
+      calls.push({ url: String(url), options });
+      return jsonResponse(unavailablePullRequest);
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls.some((call) => call.options.method === "POST"), false);
+  }
+});
+
+test("повторно проверяет open и Ready непосредственно перед публикацией", async () => {
+  const calls = [];
+  await runMainWithFetch(async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (calls.length === 1) {
+      return jsonResponse(pullRequestFixture());
+    }
+    if (calls.length === 2) {
+      return jsonResponse([]);
+    }
+    return jsonResponse(pullRequestFixture({ state: "closed" }));
+  });
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls.some((call) => call.options.method === "POST"), false);
+});
+
 test("проверяет inline comments по точному diff из доверенного файла", async () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-diff-"));
   const diffPath = join(temporaryDirectory, "pull-request.diff");
@@ -605,7 +664,7 @@ test("проверяет inline comments по точному diff из дове�
     fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+added" }),
   );
   const calls = [];
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
 
   try {
     await runMainWithFetch(async (url, options) => {
@@ -652,7 +711,7 @@ test("публикует замечание с неверной привязко
   assert.equal(partition.unanchored.length, 1);
 
   const calls = [];
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
   try {
     await runMainWithFetch(async (url, options) => {
       calls.push({ url: String(url), options });
@@ -689,7 +748,7 @@ test("не публикует повторное ревью того же diff",
   await runMainWithFetch(async (url, options) => {
     calls.push({ url: String(url), options });
     if (calls.length === 1) {
-      return jsonResponse({ base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } });
+      return jsonResponse(pullRequestFixture());
     }
     return jsonResponse([
       {
@@ -708,7 +767,7 @@ test("не публикует повторное ревью того же diff",
 test("переиздаёт legacy-ревью без доверенных метрик", async () => {
   const calls = [];
   const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
 
   await runMainWithFetch(async (url, options) => {
     calls.push({ url: String(url), options });
@@ -737,7 +796,7 @@ test("переиздаёт legacy-ревью без доверенных мет�
 test("ручной запуск публикует новое ревью даже для уже проверенного SHA", async () => {
   const calls = [];
   const marker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
 
   await runMainWithFetch(async (url, options) => {
     calls.push({ url: String(url), options });
@@ -765,7 +824,7 @@ test("ручной запуск публикует новое ревью даж�
 
 test("публикует Opus после Sonnet для того же diff", async () => {
   const calls = [];
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
   const standardMarker = reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL);
 
   await runMainWithFetch(async (url, options) => {
@@ -794,10 +853,10 @@ test("публикует Opus после Sonnet для того же diff", asyn
   assert.match(payload.body, /Claude Opus 5/u);
 });
 
-test("[6] помечает опубликованное ревью устаревшим при гонке Base SHA и падает закрыто", async () => {
+test("[6] помечает опубликованное ревью устаревшим при закрытии PR и падает закрыто", async () => {
   const calls = [];
-  const currentPullRequest = { base: { sha: BASE_SHA }, head: { sha: HEAD_SHA } };
-  const changedPullRequest = { base: { sha: "3".repeat(40) }, head: { sha: HEAD_SHA } };
+  const currentPullRequest = pullRequestFixture();
+  const changedPullRequest = pullRequestFixture({ state: "closed" });
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "review-stale-output-"));
   const outputPath = join(temporaryDirectory, "github-output.txt");
   writeFileSync(outputPath, "", "utf8");
@@ -846,7 +905,7 @@ test("[5] не публикует результат для устаревшег
 
   await runMainWithFetch(async (url, options) => {
     calls.push({ url: String(url), options });
-    return jsonResponse({ base: { sha: BASE_SHA }, head: { sha: "3".repeat(40) } });
+    return jsonResponse(pullRequestFixture({ headSha: "3".repeat(40) }));
   });
 
   assert.equal(calls.length, 1);
