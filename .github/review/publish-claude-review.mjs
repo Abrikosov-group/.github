@@ -10,6 +10,10 @@ const MAX_BODY_LENGTH = 2_000;
 const MAX_DIFF_BYTES = 50 * 1024 * 1024;
 const TECHNICAL_IDENTIFIER_MINIMUM_WEIGHT = 4;
 const TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT = 3;
+const MAX_TECHNICAL_IDENTIFIER_LETTERS = 32;
+const MAX_CAMEL_CASE_SEGMENTS = 4;
+const MAX_SEPARATED_IDENTIFIER_SEGMENTS = 2;
+const MINIMUM_RAW_RUSSIAN_RATIO = 0.4;
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -57,11 +61,19 @@ function containsSensitiveData(value) {
 }
 
 function weightedTechnicalIdentifier(value) {
+  const hasSeparator = /[._/:()[\]-]/u.test(value);
   const segments = value
     .split(/[._/:()[\]-]+/u)
     .flatMap((segment) => segment.split(/(?<=[a-z0-9])(?=[A-Z])/u))
     .filter(Boolean);
   const latinLetterCount = value.match(/[A-Za-z]/gu)?.length ?? 0;
+  const maximumSegments = hasSeparator
+    ? MAX_SEPARATED_IDENTIFIER_SEGMENTS
+    : MAX_CAMEL_CASE_SEGMENTS;
+  if (latinLetterCount > MAX_TECHNICAL_IDENTIFIER_LETTERS || segments.length > maximumSegments) {
+    return value;
+  }
+
   const weight = Math.max(
     TECHNICAL_IDENTIFIER_MINIMUM_WEIGHT,
     segments.length * TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT,
@@ -123,10 +135,11 @@ function assertSafeText(value, { label, maximumLength, multiline, requireRussian
   }
 
   if (requireRussian) {
-    const prose = value
+    const unweightedProse = value
       .replace(/```[\s\S]*?```/gu, " ")
       .replace(/`[^`\n]*`/gu, " ")
-      .replace(/https?:\/\/\S+/gu, " ")
+      .replace(/https?:\/\/\S+/gu, " ");
+    const prose = unweightedProse
       .replace(
         /[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+/gu,
         weightedTechnicalIdentifier,
@@ -135,8 +148,14 @@ function assertSafeText(value, { label, maximumLength, multiline, requireRussian
       .replace(/\b[A-Z][A-Z0-9]{1,}\b/gu, weightedTechnicalIdentifier);
     const letters = prose.match(/\p{L}/gu) ?? [];
     const russianLetters = prose.match(/[А-ЯЁа-яё]/gu) ?? [];
+    const rawLetters = unweightedProse.match(/\p{L}/gu) ?? [];
+    const rawRussianLetters = unweightedProse.match(/[А-ЯЁа-яё]/gu) ?? [];
 
-    if (russianLetters.length < 3 || russianLetters.length / letters.length < 0.5) {
+    if (
+      russianLetters.length < 3
+      || russianLetters.length / letters.length < 0.5
+      || rawRussianLetters.length / rawLetters.length < MINIMUM_RAW_RUSSIAN_RATIO
+    ) {
       throw new Error(`${label} должен содержать преимущественно русский текст.`);
     }
   }

@@ -292,6 +292,16 @@ test("учитывает связный английский текст, зам�
   disguisedUpperCase.findings[0].body =
     "Ошибка VALIDATIONACCEPTSINVALIDVALUEANDPUBLISHESENGLISHTEXTWITHOUTREJECTION";
   assert.throws(() => validateReviewJson(disguisedUpperCase), /русский текст/u);
+
+  const disguisedWithRussianFiller = validReview();
+  disguisedWithRussianFiller.findings[0].body =
+    "Существенная ошибка серьёзная проблема validation.accepts.invalid.value.and.publishes.english.text.without.rejection";
+  assert.throws(() => validateReviewJson(disguisedWithRussianFiller), /русский текст/u);
+
+  const disguisedAsSeveralShortIdentifiers = validReview();
+  disguisedAsSeveralShortIdentifiers.findings[0].body =
+    "Существенная ошибка серьёзная проблема validation.accepts invalid.value and.publishes english.text without.rejection";
+  assert.throws(() => validateReviewJson(disguisedAsSeveralShortIdentifiers), /русский текст/u);
 });
 
 test("извлекает строки обеих сторон из zero-context diff", () => {
