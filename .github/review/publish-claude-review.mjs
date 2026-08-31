@@ -8,7 +8,8 @@ const MAX_BINARY_PATH_LENGTH = 16_384;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 2_000;
 const MAX_DIFF_BYTES = 50 * 1024 * 1024;
-const TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT = 4;
+const TECHNICAL_IDENTIFIER_MINIMUM_WEIGHT = 4;
+const TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT = 3;
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -56,8 +57,17 @@ function containsSensitiveData(value) {
 }
 
 function weightedTechnicalIdentifier(value) {
-  const segmentCount = value.split(/[._/:()[\]-]+/u).filter(Boolean).length;
-  return "x".repeat(Math.max(1, segmentCount) * TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT);
+  const segments = value
+    .split(/[._/:()[\]-]+/u)
+    .flatMap((segment) => segment.split(/(?<=[a-z0-9])(?=[A-Z])/u))
+    .filter(Boolean);
+  const latinLetterCount = value.match(/[A-Za-z]/gu)?.length ?? 0;
+  const weight = Math.max(
+    TECHNICAL_IDENTIFIER_MINIMUM_WEIGHT,
+    segments.length * TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT,
+    Math.ceil(latinLetterCount / 2),
+  );
+  return "x".repeat(weight);
 }
 
 function makeInvisibleUnicodeVisible(value, label) {
