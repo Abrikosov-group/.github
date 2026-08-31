@@ -27,6 +27,7 @@ const HEAD_SHA = "2".repeat(40);
 const STANDARD_MODEL = "claude-sonnet-5";
 const DEEP_MODEL = "claude-opus-5";
 const SPARK_MODEL = "gpt-5.3-codex-spark";
+const SOL_MODEL = "gpt-5.6-sol";
 
 function pullRequestFixture({
   baseSha = BASE_SHA,
@@ -264,6 +265,14 @@ test("отклоняет англоязычные заголовок и опис
   assert.throws(() => validateReviewJson(disguisedEnglish), /русский текст/u);
 });
 
+test("принимает русский заголовок с техническими идентификаторами", () => {
+  const review = validReview();
+  review.findings[0].title =
+    "getYooKassaRenewal парсит тело ответа до проверки response.ok и без try/catch";
+
+  assert.deepEqual(validateReviewJson(review), review);
+});
+
 test("извлекает строки обеих сторон из zero-context diff", () => {
   const diff = [
     "@@ -4,2 +4,3 @@",
@@ -460,6 +469,17 @@ test("создаёт отдельное русское ревью GPT-5.3-Codex-
   assert.match(payload.body, /### Ревью Codex/u);
   assert.match(payload.body, /GPT-5\.3-Codex-Spark, усилие `xhigh`/u);
   assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
+});
+
+test("создаёт отдельное русское ревью GPT-5.6 Sol", () => {
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, SOL_MODEL);
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, SOL_MODEL);
+
+  assert.match(marker, /^<!-- codex-review:/u);
+  assert.ok(payload.body.startsWith(marker));
+  assert.match(payload.body, /### Ревью Codex/u);
+  assert.match(payload.body, /GPT-5\.6 Sol, усилие `xhigh`/u);
+  assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, SPARK_MODEL));
 });
 
 test("читает структурированный результат Codex из доверенного файла", async () => {

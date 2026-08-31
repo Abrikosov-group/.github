@@ -29,6 +29,11 @@ const REVIEW_MODELS = new Map([
     marker: "codex-review",
     reviewer: "Codex",
   }],
+  ["gpt-5.6-sol", {
+    displayName: "GPT-5.6 Sol",
+    marker: "codex-review",
+    reviewer: "Codex",
+  }],
 ]);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 const INVISIBLE_UNICODE_PATTERN = /\p{Cf}/gu;
@@ -105,7 +110,10 @@ function assertSafeText(value, { label, maximumLength, multiline, requireRussian
     const prose = value
       .replace(/```[\s\S]*?```/gu, " ")
       .replace(/`[^`\n]*`/gu, " ")
-      .replace(/https?:\/\/\S+/gu, " ");
+      .replace(/https?:\/\/\S+/gu, " ")
+      .replace(/[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+/gu, " ")
+      .replace(/\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b/gu, " ")
+      .replace(/\b[A-Z][A-Z0-9]{1,}\b/gu, " ");
     const letters = prose.match(/\p{L}/gu) ?? [];
     const russianLetters = prose.match(/[А-ЯЁа-яё]/gu) ?? [];
 
@@ -326,7 +334,8 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
   }
   if (!REVIEW_MODELS.has(reviewModel)) {
     throw new Error(
-      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5 или gpt-5.3-codex-spark.",
+      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5, " +
+        "gpt-5.3-codex-spark или gpt-5.6-sol.",
     );
   }
   return `<!-- ${REVIEW_MODELS.get(reviewModel).marker}:${baseSha}:${headSha}:${reviewModel} -->`;
