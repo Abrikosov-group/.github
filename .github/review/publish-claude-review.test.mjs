@@ -27,6 +27,7 @@ const HEAD_SHA = "2".repeat(40);
 const STANDARD_MODEL = "claude-sonnet-5";
 const DEEP_MODEL = "claude-opus-5";
 const SPARK_MODEL = "gpt-5.3-codex-spark";
+const SOL_MODEL = "gpt-5.6-sol";
 
 function pullRequestFixture({
   baseSha = BASE_SHA,
@@ -264,6 +265,72 @@ test("отклоняет англоязычные заголовок и опис
   assert.throws(() => validateReviewJson(disguisedEnglish), /русский текст/u);
 });
 
+test("принимает русский заголовок с техническими идентификаторами", () => {
+  const review = validReview();
+  review.findings[0].title =
+    "getYooKassaRenewal парсит тело ответа до проверки response.ok и без try/catch";
+
+  assert.deepEqual(validateReviewJson(review), review);
+});
+
+test("принимает длинные технические идентификаторы из точного diff", () => {
+  const cases = [
+    "getYooKassaRenewalBeforeConfirmingPayment",
+    "get_yookassa_renewal_before_confirming_payment",
+    "billing.subscription.renewal.response",
+  ];
+
+  for (const identifier of cases) {
+    const review = validReview();
+    review.findings[0].title = `Исправьте ${identifier}`;
+    const trustedDiff = `+const result = ${identifier};`;
+
+    assert.deepEqual(validateReviewJson(review, { trustedDiff }), review);
+  }
+});
+
+test("не доверяет длинному идентификатору, которого нет в точном diff", () => {
+  const review = validReview();
+  review.findings[0].title =
+    "Баг validationAcceptsInvalidValueAndPublishesEnglishTextWithoutRejection";
+
+  assert.throws(
+    () => validateReviewJson(review, { trustedDiff: "+const result = getValidValue();" }),
+    /русский текст/u,
+  );
+});
+
+test("учитывает связный английский текст, замаскированный под идентификаторы", () => {
+  const disguisedTitle = validReview();
+  disguisedTitle.findings[0].title = "Баг validation.accepts invalid.value";
+  assert.throws(() => validateReviewJson(disguisedTitle), /русский текст/u);
+
+  const disguisedBody = validReview();
+  disguisedBody.findings[0].body =
+    "Ошибка validation.accepts.invalid.value.and.publishes.english.text.without.rejection";
+  assert.throws(() => validateReviewJson(disguisedBody), /русский текст/u);
+
+  const disguisedCamelCase = validReview();
+  disguisedCamelCase.findings[0].title =
+    "Баг validationAcceptsInvalidValueAndPublishesEnglishTextWithoutRejection";
+  assert.throws(() => validateReviewJson(disguisedCamelCase), /русский текст/u);
+
+  const disguisedUpperCase = validReview();
+  disguisedUpperCase.findings[0].body =
+    "Ошибка VALIDATIONACCEPTSINVALIDVALUEANDPUBLISHESENGLISHTEXTWITHOUTREJECTION";
+  assert.throws(() => validateReviewJson(disguisedUpperCase), /русский текст/u);
+
+  const disguisedWithRussianFiller = validReview();
+  disguisedWithRussianFiller.findings[0].body =
+    "Существенная ошибка серьёзная проблема validation.accepts.invalid.value.and.publishes.english.text.without.rejection";
+  assert.throws(() => validateReviewJson(disguisedWithRussianFiller), /русский текст/u);
+
+  const disguisedAsSeveralShortIdentifiers = validReview();
+  disguisedAsSeveralShortIdentifiers.findings[0].body =
+    "Существенная ошибка серьёзная проблема validation.accepts invalid.value and.publishes english.text without.rejection";
+  assert.throws(() => validateReviewJson(disguisedAsSeveralShortIdentifiers), /русский текст/u);
+});
+
 test("извлекает строки обеих сторон из zero-context diff", () => {
   const diff = [
     "@@ -4,2 +4,3 @@",
@@ -460,6 +527,17 @@ test("создаёт отдельное русское ревью GPT-5.3-Codex-
   assert.match(payload.body, /### Ревью Codex/u);
   assert.match(payload.body, /GPT-5\.3-Codex-Spark, усилие `xhigh`/u);
   assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
+});
+
+test("создаёт отдельное русское ревью GPT-5.6 Sol", () => {
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, SOL_MODEL);
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, SOL_MODEL);
+
+  assert.match(marker, /^<!-- codex-review:/u);
+  assert.ok(payload.body.startsWith(marker));
+  assert.match(payload.body, /### Ревью Codex/u);
+  assert.match(payload.body, /GPT-5\.6 Sol, усилие `xhigh`/u);
+  assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, SPARK_MODEL));
 });
 
 test("читает структурированный результат Codex из доверенного файла", async () => {
@@ -659,9 +737,11 @@ test("повторно проверяет open и Ready непосредстве
 test("проверяет inline comments по точному diff из доверенного файла", async () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-diff-"));
   const diffPath = join(temporaryDirectory, "pull-request.diff");
+  const review = validReview();
+  review.findings[0].title = "Исправьте getYooKassaRenewalBeforeConfirmingPayment";
   writeFileSync(
     diffPath,
-    fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+added" }),
+    fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+getYooKassaRenewalBeforeConfirmingPayment();" }),
   );
   const calls = [];
   const currentPullRequest = pullRequestFixture();
@@ -680,7 +760,7 @@ test("проверяет inline comments по точному diff из дове�
         html_url: "https://github.com/example/sawabook/pull/55#review-with-comment",
       });
     }, {
-      REVIEW_JSON: JSON.stringify(validReview()),
+      REVIEW_JSON: JSON.stringify(review),
       DIFF_PATH: diffPath,
     });
   } finally {
