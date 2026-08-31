@@ -8,6 +8,7 @@ const MAX_BINARY_PATH_LENGTH = 16_384;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 2_000;
 const MAX_DIFF_BYTES = 50 * 1024 * 1024;
+const TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT = 4;
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -52,6 +53,11 @@ const SENSITIVE_DATA_PATTERNS = [
 
 function containsSensitiveData(value) {
   return SENSITIVE_DATA_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function weightedTechnicalIdentifier(value) {
+  const segmentCount = value.split(/[._/:()[\]-]+/u).filter(Boolean).length;
+  return "x".repeat(Math.max(1, segmentCount) * TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT);
 }
 
 function makeInvisibleUnicodeVisible(value, label) {
@@ -111,9 +117,12 @@ function assertSafeText(value, { label, maximumLength, multiline, requireRussian
       .replace(/```[\s\S]*?```/gu, " ")
       .replace(/`[^`\n]*`/gu, " ")
       .replace(/https?:\/\/\S+/gu, " ")
-      .replace(/[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+/gu, " ")
-      .replace(/\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b/gu, " ")
-      .replace(/\b[A-Z][A-Z0-9]{1,}\b/gu, " ");
+      .replace(
+        /[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+/gu,
+        weightedTechnicalIdentifier,
+      )
+      .replace(/\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b/gu, weightedTechnicalIdentifier)
+      .replace(/\b[A-Z][A-Z0-9]{1,}\b/gu, weightedTechnicalIdentifier);
     const letters = prose.match(/\p{L}/gu) ?? [];
     const russianLetters = prose.match(/[А-ЯЁа-яё]/gu) ?? [];
 

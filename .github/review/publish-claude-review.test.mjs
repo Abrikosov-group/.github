@@ -273,6 +273,17 @@ test("принимает русский заголовок с техническ
   assert.deepEqual(validateReviewJson(review), review);
 });
 
+test("учитывает связный английский текст, замаскированный под идентификаторы", () => {
+  const disguisedTitle = validReview();
+  disguisedTitle.findings[0].title = "Баг validation.accepts invalid.value";
+  assert.throws(() => validateReviewJson(disguisedTitle), /русский текст/u);
+
+  const disguisedBody = validReview();
+  disguisedBody.findings[0].body =
+    "Ошибка validation.accepts.invalid.value.and.publishes.english.text.without.rejection";
+  assert.throws(() => validateReviewJson(disguisedBody), /русский текст/u);
+});
+
 test("извлекает строки обеих сторон из zero-context diff", () => {
   const diff = [
     "@@ -4,2 +4,3 @@",
