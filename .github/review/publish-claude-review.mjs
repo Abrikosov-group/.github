@@ -14,6 +14,8 @@ const MAX_TECHNICAL_IDENTIFIER_LETTERS = 32;
 const MAX_CAMEL_CASE_SEGMENTS = 4;
 const MAX_SEPARATED_IDENTIFIER_SEGMENTS = 2;
 const MINIMUM_RAW_RUSSIAN_RATIO = 0.4;
+const TECHNICAL_IDENTIFIER_PATTERN =
+  /[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+|\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9]{1,}\b/gu;
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -60,7 +62,11 @@ function containsSensitiveData(value) {
   return SENSITIVE_DATA_PATTERNS.some((pattern) => pattern.test(value));
 }
 
-function weightedTechnicalIdentifier(value) {
+function weightedTechnicalIdentifier(value, trustedTechnicalIdentifiers) {
+  if (trustedTechnicalIdentifiers.has(value)) {
+    return " ";
+  }
+
   const hasSeparator = /[._/:()[\]-]/u.test(value);
   const segments = value
     .split(/[._/:()[\]-]+/u)
@@ -80,6 +86,14 @@ function weightedTechnicalIdentifier(value) {
     Math.ceil(latinLetterCount / 2),
   );
   return "x".repeat(weight);
+}
+
+function collectTrustedTechnicalIdentifiers(diff) {
+  if (typeof diff !== "string") {
+    return new Set();
+  }
+
+  return new Set([...diff.matchAll(TECHNICAL_IDENTIFIER_PATTERN)].map((match) => match[0]));
 }
 
 function makeInvisibleUnicodeVisible(value, label) {
@@ -113,7 +127,16 @@ function assertExactKeys(value, expectedKeys, label) {
   }
 }
 
-function assertSafeText(value, { label, maximumLength, multiline, requireRussian = false }) {
+function assertSafeText(
+  value,
+  {
+    label,
+    maximumLength,
+    multiline,
+    requireRussian = false,
+    trustedTechnicalIdentifiers = new Set(),
+  },
+) {
   if (typeof value !== "string" || value.length === 0 || value.length > maximumLength) {
     throw new Error(`${label} должен быть непустой строкой длиной не более ${maximumLength} символов.`);
   }
@@ -141,15 +164,17 @@ function assertSafeText(value, { label, maximumLength, multiline, requireRussian
       .replace(/https?:\/\/\S+/gu, " ");
     const prose = unweightedProse
       .replace(
-        /[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+/gu,
-        weightedTechnicalIdentifier,
-      )
-      .replace(/\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b/gu, weightedTechnicalIdentifier)
-      .replace(/\b[A-Z][A-Z0-9]{1,}\b/gu, weightedTechnicalIdentifier);
+        TECHNICAL_IDENTIFIER_PATTERN,
+        (identifier) => weightedTechnicalIdentifier(identifier, trustedTechnicalIdentifiers),
+      );
+    const rawProse = unweightedProse.replace(
+      TECHNICAL_IDENTIFIER_PATTERN,
+      (identifier) => trustedTechnicalIdentifiers.has(identifier) ? " " : identifier,
+    );
     const letters = prose.match(/\p{L}/gu) ?? [];
     const russianLetters = prose.match(/[А-ЯЁа-яё]/gu) ?? [];
-    const rawLetters = unweightedProse.match(/\p{L}/gu) ?? [];
-    const rawRussianLetters = unweightedProse.match(/[А-ЯЁа-яё]/gu) ?? [];
+    const rawLetters = rawProse.match(/\p{L}/gu) ?? [];
+    const rawRussianLetters = rawProse.match(/[А-ЯЁа-яё]/gu) ?? [];
 
     if (
       russianLetters.length < 3
@@ -183,7 +208,7 @@ function validatePath(value) {
   return value;
 }
 
-export function validateReviewJson(rawReview) {
+export function validateReviewJson(rawReview, { trustedDiff = null } = {}) {
   let review;
   try {
     review = typeof rawReview === "string" ? JSON.parse(rawReview) : rawReview;
@@ -197,6 +222,8 @@ export function validateReviewJson(rawReview) {
   if (!Array.isArray(review.findings) || review.findings.length > MAX_FINDINGS) {
     throw new Error(`Поле findings должно быть массивом не более чем из ${MAX_FINDINGS} элементов.`);
   }
+
+  const trustedTechnicalIdentifiers = collectTrustedTechnicalIdentifiers(trustedDiff);
 
   const anchors = new Set();
   const findings = review.findings.map((finding, index) => {
@@ -221,12 +248,14 @@ export function validateReviewJson(rawReview) {
       maximumLength: MAX_TITLE_LENGTH,
       multiline: false,
       requireRussian: true,
+      trustedTechnicalIdentifiers,
     });
     const body = assertSafeText(makeInvisibleUnicodeVisible(finding.body, `${label}: body`), {
       label: `${label}: body`,
       maximumLength: MAX_BODY_LENGTH,
       multiline: true,
       requireRussian: true,
+      trustedTechnicalIdentifiers,
     });
 
     const anchor = `${path}\u0000${finding.side}\u0000${finding.line}`;
@@ -778,7 +807,8 @@ export async function main() {
   const rawReview = process.env.REVIEW_JSON_FILE
     ? readFileSync(process.env.REVIEW_JSON_FILE, "utf8")
     : requireEnvironment("REVIEW_JSON");
-  const review = validateReviewJson(rawReview);
+  const diff = process.env.DIFF_PATH ? exactDiff() : null;
+  const review = validateReviewJson(rawReview, { trustedDiff: diff });
   const rawManifest = process.env.BINARY_MANIFEST_PATH
     ? readFileSync(process.env.BINARY_MANIFEST_PATH, "utf8")
     : requireEnvironment("BINARY_MANIFEST_JSON");
@@ -818,7 +848,7 @@ export async function main() {
   }
 
   const { anchored, unanchored } = review.findings.length > 0
-    ? partitionFindingAnchors(review.findings, exactDiff())
+    ? partitionFindingAnchors(review.findings, diff ?? exactDiff())
     : { anchored: [], unanchored: [] };
   if (unanchored.length > 0) {
     console.warn(

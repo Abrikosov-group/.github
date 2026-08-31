@@ -273,6 +273,33 @@ test("принимает русский заголовок с техническ
   assert.deepEqual(validateReviewJson(review), review);
 });
 
+test("принимает длинные технические идентификаторы из точного diff", () => {
+  const cases = [
+    "getYooKassaRenewalBeforeConfirmingPayment",
+    "get_yookassa_renewal_before_confirming_payment",
+    "billing.subscription.renewal.response",
+  ];
+
+  for (const identifier of cases) {
+    const review = validReview();
+    review.findings[0].title = `Исправьте ${identifier}`;
+    const trustedDiff = `+const result = ${identifier};`;
+
+    assert.deepEqual(validateReviewJson(review, { trustedDiff }), review);
+  }
+});
+
+test("не доверяет длинному идентификатору, которого нет в точном diff", () => {
+  const review = validReview();
+  review.findings[0].title =
+    "Баг validationAcceptsInvalidValueAndPublishesEnglishTextWithoutRejection";
+
+  assert.throws(
+    () => validateReviewJson(review, { trustedDiff: "+const result = getValidValue();" }),
+    /русский текст/u,
+  );
+});
+
 test("учитывает связный английский текст, замаскированный под идентификаторы", () => {
   const disguisedTitle = validReview();
   disguisedTitle.findings[0].title = "Баг validation.accepts invalid.value";
@@ -710,9 +737,11 @@ test("повторно проверяет open и Ready непосредстве
 test("проверяет inline comments по точному diff из доверенного файла", async () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-diff-"));
   const diffPath = join(temporaryDirectory, "pull-request.diff");
+  const review = validReview();
+  review.findings[0].title = "Исправьте getYooKassaRenewalBeforeConfirmingPayment";
   writeFileSync(
     diffPath,
-    fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+added" }),
+    fileDiff({ hunk: "@@ -8,0 +12,1 @@\n+getYooKassaRenewalBeforeConfirmingPayment();" }),
   );
   const calls = [];
   const currentPullRequest = pullRequestFixture();
@@ -731,7 +760,7 @@ test("проверяет inline comments по точному diff из дове�
         html_url: "https://github.com/example/sawabook/pull/55#review-with-comment",
       });
     }, {
-      REVIEW_JSON: JSON.stringify(validReview()),
+      REVIEW_JSON: JSON.stringify(review),
       DIFF_PATH: diffPath,
     });
   } finally {
