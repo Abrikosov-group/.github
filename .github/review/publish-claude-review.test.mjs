@@ -112,6 +112,7 @@ async function runMainWithFetch(fetchImplementation, environmentOverrides = {}) 
     BASE_SHA,
     HEAD_SHA,
     GH_TOKEN: "test-token-without-production-access",
+    REVIEW_DRAFTS: "false",
     REVIEW_MODEL: STANDARD_MODEL,
     REVIEW_JSON: JSON.stringify({ findings: [] }),
     BINARY_MANIFEST_JSON: JSON.stringify(binaryManifest()),
@@ -910,4 +911,57 @@ test("[5] не публикует результат для устаревшег
 
   assert.equal(calls.length, 1);
   assert.equal(calls.some((call) => call.options.method === "POST"), false);
+});
+
+
+test("Draft opt-in публикует оба вида ревью и не повторяет доверенный отчёт", async () => {
+  for (const model of [STANDARD_MODEL, SPARK_MODEL]) {
+    const calls = [];
+    await runMainWithFetch(async (url, options) => {
+      calls.push({ url: String(url), options });
+      if ([1, 3, 5].includes(calls.length)) return jsonResponse(pullRequestFixture({ draft: true }));
+      if (calls.length === 2) return jsonResponse([]);
+      return jsonResponse({ id: 42, html_url: "https://github.com/example/sawabook/pull/55#review" });
+    }, { REVIEW_DRAFTS: "true", REVIEW_MODEL: model });
+    assert.equal(calls.length, 5);
+    assert.equal(calls[3].options.method, "POST");
+    let reads = 0;
+    const needed = await withFetch(async () => {
+      reads++;
+      if (reads === 1) return jsonResponse(pullRequestFixture({ draft: true }));
+      return jsonResponse([{ user: { login: "github-actions[bot]" }, id: 42,
+        body: `${reviewMarker(BASE_SHA, HEAD_SHA, model)}\n${findingsMarker()}\n${binaryCoverageMarker()}` }]);
+    }, () => reviewNeeded({ repository: "example/sawabook", pullNumber: 55, baseSha: BASE_SHA,
+      headSha: HEAD_SHA, reviewModel: model, token: "test", reviewDrafts: true, binaryManifest: binaryManifest() }));
+    assert.equal(needed, false);
+  }
+});
+
+test("Draft opt-in отклоняет закрытый PR, неверный тип draft и смену base/head", async () => {
+  for (const fixture of [
+    { draft: true, state: "closed" }, { draft: null }, { draft: "false" }, { draft: "true" },
+    { draft: true, baseSha: "3".repeat(40) }, { draft: true, headSha: "3".repeat(40) },
+  ]) {
+    const calls = [];
+    await runMainWithFetch(async (url, options) => {
+      calls.push({ url, options }); return jsonResponse(pullRequestFixture(fixture));
+    }, { REVIEW_DRAFTS: "true" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls.some(c => c.options.method === "POST"), false);
+  }
+});
+
+test("Draft opt-in компенсирует смену снимка после публикации", async () => {
+  for (const changed of [{ state: "closed" }, { baseSha: "3".repeat(40) }, { headSha: "3".repeat(40) }]) {
+    const calls = [];
+    await assert.rejects(runMainWithFetch(async (url, options) => {
+      calls.push({ url, options });
+      if ([1, 3].includes(calls.length)) return jsonResponse(pullRequestFixture({ draft: true }));
+      if (calls.length === 2) return jsonResponse([]);
+      if (calls.length === 5) return jsonResponse(pullRequestFixture({ draft: true, ...changed }));
+      return jsonResponse({ id: 42, html_url: "https://github.com/example/sawabook/pull/55#review" });
+    }, { REVIEW_DRAFTS: "true" }), /устаревшее ревью/u);
+    assert.equal(calls[5].options.method, "PUT");
+    assert.match(JSON.parse(calls[5].options.body).body, /устарело/u);
+  }
 });

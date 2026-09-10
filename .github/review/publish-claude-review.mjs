@@ -659,9 +659,9 @@ async function currentPullRequest({ repository, pullNumber, token }) {
   return githubRequest(`/repos/${repository}/pulls/${pullNumber}`, { token });
 }
 
-function pullRequestMatches(pullRequest, baseSha, headSha) {
+function pullRequestMatches(pullRequest, baseSha, headSha, reviewDrafts = false) {
   return pullRequest?.state === "open" &&
-    pullRequest?.draft === false &&
+    (pullRequest?.draft === false || (reviewDrafts === true && pullRequest?.draft === true)) &&
     pullRequest?.base?.sha === baseSha &&
     pullRequest?.head?.sha === headSha;
 }
@@ -675,12 +675,13 @@ export async function reviewNeeded({
   token,
   publisherLogin = "github-actions[bot]",
   forceReview = false,
+  reviewDrafts = false,
   binaryManifest = null,
 }) {
   validateRequestContext({ repository, pullNumber, baseSha, headSha, reviewModel });
 
   const pullRequest = await currentPullRequest({ repository, pullNumber, token });
-  if (!pullRequestMatches(pullRequest, baseSha, headSha)) {
+  if (!pullRequestMatches(pullRequest, baseSha, headSha, reviewDrafts)) {
     return false;
   }
   if (forceReview) {
@@ -715,6 +716,7 @@ async function checkReviewNeededFromEnvironment() {
     token: requireEnvironment("GH_TOKEN"),
     publisherLogin: process.env.REVIEW_PUBLISHER_LOGIN ?? "github-actions[bot]",
     forceReview: process.env.FORCE_REVIEW === "true",
+    reviewDrafts: process.env.REVIEW_DRAFTS === "true",
   });
 }
 
@@ -728,6 +730,7 @@ export async function main() {
   const reviewModel = requireEnvironment("REVIEW_MODEL");
   const publisherLogin = process.env.REVIEW_PUBLISHER_LOGIN ?? "github-actions[bot]";
   const forceReview = process.env.FORCE_REVIEW === "true";
+  const reviewDrafts = process.env.REVIEW_DRAFTS === "true";
   const rawReview = process.env.REVIEW_JSON_FILE
     ? readFileSync(process.env.REVIEW_JSON_FILE, "utf8")
     : requireEnvironment("REVIEW_JSON");
@@ -744,8 +747,8 @@ export async function main() {
 
   const marker = reviewMarker(baseSha, headSha, reviewModel);
   const initialPullRequest = await currentPullRequest({ repository, pullNumber, token });
-  if (!pullRequestMatches(initialPullRequest, baseSha, headSha)) {
-    console.log("PR закрыт, переведён в Draft либо его Base или Head уже изменился; ревью не опубликовано.");
+  if (!pullRequestMatches(initialPullRequest, baseSha, headSha, reviewDrafts)) {
+    console.log("PR закрыт, переведён в Draft без разрешения либо его Base или Head уже изменился; ревью не опубликовано.");
     return;
   }
 
@@ -780,8 +783,8 @@ export async function main() {
   }
 
   const latestPullRequest = await currentPullRequest({ repository, pullNumber, token });
-  if (!pullRequestMatches(latestPullRequest, baseSha, headSha)) {
-    console.log("PR закрыт, переведён в Draft либо его Base или Head изменился во время проверки; ревью не опубликовано.");
+  if (!pullRequestMatches(latestPullRequest, baseSha, headSha, reviewDrafts)) {
+    console.log("PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился во время проверки; ревью не опубликовано.");
     return;
   }
 
@@ -798,7 +801,7 @@ export async function main() {
   });
 
   const finalPullRequest = await currentPullRequest({ repository, pullNumber, token });
-  if (!pullRequestMatches(finalPullRequest, baseSha, headSha)) {
+  if (!pullRequestMatches(finalPullRequest, baseSha, headSha, reviewDrafts)) {
     if (!Number.isSafeInteger(result?.id) || result.id < 1) {
       throw new Error("GitHub не вернул ID опубликованного ревью; его нельзя пометить устаревшим.");
     }
@@ -807,9 +810,9 @@ export async function main() {
       body: { body: buildStaleReviewBody(baseSha, headSha, reviewModel) },
       token,
     });
-    console.log(`Ревью ${result.html_url} помечено устаревшим после закрытия PR, перевода в Draft либо изменения Base или Head SHA.`);
+    console.log(`Ревью ${result.html_url} помечено устаревшим после закрытия PR, перевода в Draft без разрешения либо изменения Base или Head SHA.`);
     throw new Error(
-      "PR закрыт, переведён в Draft либо его Base или Head изменился после публикации; устаревшее ревью не считается успешно опубликованным.",
+      "PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился после публикации; устаревшее ревью не считается успешно опубликованным.",
     );
   }
 
