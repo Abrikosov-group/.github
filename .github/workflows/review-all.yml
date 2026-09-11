@@ -86,6 +86,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: true
         type: boolean
+      review_drafts:
+        description: Разрешить ревью открытых Draft PR; включается доверенным caller
+        required: false
+        default: false
+        type: boolean
       review_gate_context:
         description: Имя commit status двойного ревью; пустое отключает status
         required: false
@@ -108,6 +113,9 @@ name: Организационное двойное ИИ-ревью
         required: false
 
 permissions: {}
+
+env:
+  REVIEW_DRAFTS: ${{ inputs.review_drafts }}
 
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
@@ -294,12 +302,12 @@ jobs:
               event_base_ref="$(jq -er '.pull_request.base.ref' "${GITHUB_EVENT_PATH}")"
               event_head_sha="$(jq -er '.pull_request.head.sha' "${GITHUB_EVENT_PATH}")"
               event_head_repository="$(jq -er '.pull_request.head.repo.full_name' "${GITHUB_EVENT_PATH}")"
-              event_draft="$(jq -er '.pull_request.draft | tostring' "${GITHUB_EVENT_PATH}")"
+              event_draft="$(jq -er '.pull_request | (.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true"))' "${GITHUB_EVENT_PATH}")"
               if [[ "${event_pr_number}" != "${PR_NUMBER}" ||
                     "${event_head_sha}" != "${EXPECTED_HEAD_SHA}" ||
                     "${event_head_repository}" != "${REPOSITORY}" ||
-                    "${event_draft}" != "false" ]]; then
-                echo "::error::Событие не совпадает с безопасным снимком готового PR"
+                    "${event_draft}" != "true" ]]; then
+                echo "::error::Событие не совпадает с безопасным снимком разрешённого PR"
                 exit 1
               fi
               if [[ "${EVENT_ACTION}" == "edited" ]]; then
@@ -335,8 +343,8 @@ jobs:
             exit 1
           fi
           if [[ "${TRIGGER}" == "automatic" &&
-                "$(jq -r '.draft | tostring' <<< "${pr_json}")" != "false" ]]; then
-            echo "::error::Автоматическое ревью запускается только в состоянии Ready for review"
+                "$(jq -r '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${pr_json}")" != "true" ]]; then
+            echo "::error::Состояние PR не разрешено настройкой review_drafts"
             exit 1
           fi
 
@@ -628,10 +636,10 @@ jobs:
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился до подготовки Codex"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился до подготовки Codex"
             exit 1
           fi
 
@@ -817,10 +825,10 @@ jobs:
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${latest_pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${latest_pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${latest_pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${latest_pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился во время подготовки Codex"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился во время подготовки Codex"
             exit 1
           fi
 
@@ -884,10 +892,10 @@ jobs:
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился перед запуском Codex"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился перед запуском Codex"
             exit 1
           fi
 
@@ -1126,10 +1134,10 @@ jobs:
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился до получения diff"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился до получения diff"
             exit 1
           fi
 
@@ -1195,10 +1203,10 @@ jobs:
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${latest_pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${latest_pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${latest_pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${latest_pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился во время получения diff"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился во время получения diff"
             exit 1
           fi
 
@@ -1294,10 +1302,10 @@ jobs:
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился перед запуском Claude"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился перед запуском Claude"
             exit 1
           fi
 
@@ -1469,10 +1477,10 @@ jobs:
 
           pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился до независимой проверки входа Claude"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился до независимой проверки входа Claude"
             exit 1
           fi
 
@@ -1514,10 +1522,10 @@ jobs:
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
           if [[ "$(jq -er '.state' <<< "${latest_pr_json}")" != "open" ||
-                "$(jq -er '.draft | tostring' <<< "${latest_pr_json}")" != "false" ||
+                "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${latest_pr_json}")" != "true" ||
                 "$(jq -er '.base.sha' <<< "${latest_pr_json}")" != "${BASE_SHA}" ||
                 "$(jq -er '.head.sha' <<< "${latest_pr_json}")" != "${HEAD_SHA}" ]]; then
-            echo "::error::PR закрыт, переведён в Draft либо его Base или Head изменился во время независимой проверки входа Claude"
+            echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился во время независимой проверки входа Claude"
             exit 1
           fi
 
@@ -1626,7 +1634,7 @@ jobs:
             current_base_sha="$(jq -er '.base.sha' <<< "${current_pr_json}")"
             current_head_sha="$(jq -er '.head.sha' <<< "${current_pr_json}")"
             [[ "$(jq -er '.state' <<< "${current_pr_json}")" == "open" &&
-               "$(jq -er '.draft | tostring' <<< "${current_pr_json}")" == "false" &&
+               "$(jq -er '.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")' <<< "${current_pr_json}")" == "true" &&
                "${current_base_sha}" == "${BASE_SHA}" &&
                "${current_head_sha}" == "${HEAD_SHA}" ]]
           }
@@ -1638,7 +1646,7 @@ jobs:
           ${marker}
           ### ❌ Результат ИИ-ревью устарел
 
-          Проверенный снимок \`${head_short}\` больше не соответствует открытому Ready PR с ожидаемыми Base/Head.
+          Проверенный снимок \`${head_short}\` больше не соответствует открытому разрешённому PR с ожидаемыми Base/Head.
 
           Результат этого запуска нельзя использовать как подтверждение готовности.
 

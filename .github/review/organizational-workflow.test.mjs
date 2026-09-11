@@ -1984,3 +1984,80 @@ test("[17] README и CONTRIBUTING описывают очередь и реак�
     assert.doesNotMatch(document, /сразу ставит[^\n]*🚀/u);
   }
 });
+
+
+test("Draft opt-in допускает только булевый Draft и сохраняет проверки источника", () => {
+  const headSha = "b".repeat(40);
+  for (const reviewDrafts of ["false", "true"]) {
+    for (const draft of [false, true, null, "false", "true", 0, 1]) {
+      const event = automaticEvent(headSha);
+      event.pull_request.draft = draft;
+      const result = executeRunScript({
+        stepName: "Проверить источник запуска",
+        ghMock: contextGhMock,
+        event,
+        env: contextEnv({
+          REVIEW_DRAFTS: reviewDrafts, EXPECTED_HEAD_SHA: headSha,
+          MOCK_PR_JSON: prFixture({ draft }),
+        }),
+      });
+      const expected = draft === false || (draft === true && reviewDrafts === "true");
+      assert.equal(result.status === 0, expected, `${reviewDrafts}/${draft}: ${result.stdout} ${result.stderr}`);
+    }
+  }
+  for (const overrides of [
+    { MOCK_PERMISSION: "read" },
+    { MOCK_PR_JSON: prFixture({ draft: true, headRepository: "external/fork" }) },
+    { MOCK_PR_JSON: prFixture({ draft: true, state: "closed" }) },
+    { MOCK_PR_JSON: prFixture({ draft: true, baseRef: "untrusted" }) },
+  ]) {
+    const event = automaticEvent(headSha);
+    event.pull_request.draft = true;
+    const result = executeRunScript({
+      stepName: "Проверить источник запуска", ghMock: contextGhMock, event,
+      env: contextEnv({ EXPECTED_HEAD_SHA: headSha, REVIEW_DRAFTS: "true", MOCK_PR_JSON: prFixture({ draft: true }), ...overrides }),
+    });
+    assert.notEqual(result.status, 0);
+  }
+});
+
+test("проверки перед обеими моделями допускают Draft opt-in и отсекают устаревший снимок", () => {
+  for (const stepName of ["Повторно проверить PR перед запуском Codex", "Повторно проверить PR перед запуском Claude"]) {
+    for (const draft of [false, true, null, "false"]) {
+      const result = executeRunScript({ stepName, ghMock: markerGhMock,
+        env: { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", REVIEW_DRAFTS: "true",
+          BASE_SHA: "a".repeat(40), HEAD_SHA: "b".repeat(40), MOCK_PR_JSON: prFixture({ draft }) } });
+      assert.equal(result.status === 0, typeof draft === "boolean", result.stdout + result.stderr);
+    }
+    for (const changed of [{ state: "closed" }, { headSha: "c".repeat(40) }, { baseSha: "c".repeat(40) }]) {
+      const result = executeRunScript({ stepName, ghMock: markerGhMock,
+        env: { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", REVIEW_DRAFTS: "true",
+          BASE_SHA: "a".repeat(40), HEAD_SHA: "b".repeat(40), MOCK_PR_JSON: prFixture({ draft: true, ...changed }) } });
+      assert.notEqual(result.status, 0);
+    }
+  }
+});
+
+
+test("Draft opt-in сохраняет актуальный итог и проверяет состояние после записи", () => {
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", STATUS_COMMENT_ID: "99",
+    BASE_SHA: "a".repeat(40), HEAD_SHA: "b".repeat(40), MODE: "all",
+    RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1",
+    REVIEW_GATE_CONTEXT: "ИИ-ревью / Готовность", REVIEW_DRAFTS: "true", MOCK_PR_DRAFT: "true",
+    CODEX_ANALYZE_RESULT: "success", CODEX_PUBLISH_RESULT: "success",
+    CLAUDE_ANALYZE_RESULT: "success", CLAUDE_PUBLISH_RESULT: "success",
+    CODEX_PREPARE_RESULT: "success", CODEX_REVIEW_NEEDED: "true", CLAUDE_REVIEW_NEEDED: "true",
+    CODEX_PUBLISHED_BLOCKING_FINDINGS: "0", CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "0",
+  };
+  const result = executeRunScript({ stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock, env: commonEnv });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.ghLog, /Результат ИИ-ревью устарел/u);
+  assert.match(result.ghLog, /--raw-field state=success/u);
+  const changed = executeRunScript({ stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock, env: { ...commonEnv, MOCK_PR_CHANGE_AFTER_READS: "2", MOCK_CHANGED_PR_STATE: "closed" } });
+  assert.notEqual(changed.status, 0);
+  assert.match(changed.ghLog, /Результат ИИ-ревью устарел/u);
+  assert.match(changed.ghLog, /--raw-field state=failure/u);
+});
