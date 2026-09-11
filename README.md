@@ -7,15 +7,16 @@
 Центральный reusable workflow `.github/workflows/review-all.yml` выполняет
 двойное ревью pull request:
 
-- GPT-5.3-Codex-Spark с усилием `xhigh` через Codex CLI на отдельном защищённом
+- Codex с усилием `xhigh` через Codex CLI на отдельном защищённом
   self-hosted runner и оплаченный вход ChatGPT;
 - Claude Sonnet 5 с усилием `xhigh` через подписочный OAuth Claude Code на
   отдельном защищённом self-hosted runner.
 
 Gemini и платные API-ключи моделей не используются.
 
-Codex запускается командой `codex exec --model gpt-5.3-codex-spark` с
-`model_reasoning_effort="xhigh"`. Workflow не вызывает `@codex review`, не
+Codex запускается с `model_reasoning_effort="xhigh"`. Видимый вход до 224 КиБ
+анализирует `gpt-5.3-codex-spark`, а вход до 672883 байт — `gpt-5.6-sol`.
+Границы учитывают prompt вместе с JSON-схемой. Workflow не вызывает `@codex review`, не
 использует квоту встроенного Security Review и не требует OpenAI API-ключ.
 Полный текстовый diff передаётся модели без checkout недоверенного PR на сервере.
 Сырые Git binary patch, распознаваемые base64/base85 payload и содержимое
@@ -31,9 +32,9 @@ Codex запускается командой `codex exec --model gpt-5.3-codex-
 по group и label и проверяют его точное имя до содержательной работы. Модельные
 runner изолированы друг от друга и от служебного runner. На Codex runner должен
 быть выполнен подписочный вход `codex login`; его `CODEX_HOME` сохраняется между
-запусками. Окончательный prompt одного запуска Codex ограничен 512 KiB. Поэтому
+запусками. Поэтому
 бинарно-тяжёлые PR больше не блокируются только из-за явно обозначенного base85-представления файлов,
-а действительно большой текстовый diff по-прежнему требует отдельного решения.
+а вход выше проверенной границы Sol завершается ошибкой до вызова модели.
 
 Репозитории подключают workflow маленьким файлом
 `.github/workflows/review-all.yml`. Для нового репозитория используйте
