@@ -47,15 +47,17 @@ export function fallbackReason({ code, signal, events, reportPresent, timedOut }
 export function codexInvocation({ model, workDir, schemaPath, resultPath, env = process.env }) {
   if (!MODELS.has(model)) throw new Error("Недопустимая модель Codex.");
   const cleanEnv = {};
-  for (const key of ["HOME", "PATH", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
+  for (const key of ["HOME", "PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
     if (env[key]) cleanEnv[key] = env[key];
   }
+  cleanEnv.LANG = env.LANG || "C.UTF-8";
   cleanEnv.CODEX_HOME = env.CODEX_HOME || join(env.HOME, ".codex");
   cleanEnv.TMPDIR = env.RUNNER_TEMP;
   const args = ["exec", "--model", model, "-c", 'model_reasoning_effort="xhigh"',
-    "-c", 'service_tier="default"', "-c", 'web_search="disabled"',
+    "-c", 'web_search="disabled"',
     "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules"];
   for (const feature of ["shell_tool", "apps", "plugins", "browser_use", "computer_use", "image_generation", "multi_agent", "skill_search"]) args.push("--disable", feature);
+  if (model === FALLBACK_MODEL) args.push("-c", 'service_tier="default"');
   args.push("--color", "never", "--json", "--cd", workDir, "--output-schema", schemaPath, "--output-last-message", resultPath, "-");
   return { args, env: cleanEnv };
 }
@@ -170,7 +172,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     const workDir = join(dir, "empty-workspace");
     await mkdir(workDir, { recursive: true, mode: 0o700 });
     const resultPath = join(dir, "review.json");
-    const record = { id, model, reasoningEffort: "xhigh", serviceTier: "default", reason,
+    const record = { id, model, reasoningEffort: "xhigh", serviceTier: model === FALLBACK_MODEL ? "default" : null, reason,
       previousId: audit.attempts.at(-1)?.id ?? null, status: "reserved" };
     audit.attempts.push(record);
     if (reason) audit.fallbackReserved = true;
@@ -233,7 +235,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   }).then(async audit => {
     if (process.env.GITHUB_OUTPUT) await writeFile(process.env.GITHUB_OUTPUT,
       `review_model=${audit.acceptedModel}\nfallback_used=${audit.fallbackReserved}\n`, { flag: "a" });
-    console.log(`Codex: ${audit.acceptedModel}, xhigh, service_tier=default; резерв: ${audit.fallbackReserved}.`);
+    console.log(`Codex: ${audit.acceptedModel}, xhigh, service_tier=${audit.attempts.at(-1).serviceTier ?? "не задан"}; резерв: ${audit.fallbackReserved}.`);
   }).catch(() => {
     // Error text can contain a child stderr or a transport response. Only the
     // bounded, non-sensitive audit enums leave the runner.

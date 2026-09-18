@@ -44,6 +44,7 @@ test("unsupported Spark reserves exactly one Sol; same input, fresh directory, l
   assert.equal(audit.attempts[1].previousId, audit.attempts[0].id);
   assert.equal(audit.attempts[1].reasoningEffort, "xhigh");
   assert.equal(audit.attempts[1].serviceTier, "default");
+  assert.equal(audit.attempts[0].serviceTier, null);
   assert.ok(h.checks() >= 6);
   await assert.rejects(runRound({ ...h.options, execute: h.success }), /EEXIST/u);
   assert.equal(h.calls.length, 2);
@@ -175,10 +176,21 @@ test("a late primary result cannot overwrite the accepted fallback or Claude dat
 test("CLI receives no GitHub token, user config, tools or writable workspace", () => {
   const invocation = codexInvocation({ model: FALLBACK_MODEL, workDir: "/empty", schemaPath: "/schema", resultPath: "/result",
     env: { HOME: "/home/model", PATH: "/bin", RUNNER_TEMP: "/tmp", GH_TOKEN: "private", GITHUB_TOKEN: "private", OPENAI_API_KEY: "private", FAST: "true" } });
-  assert.deepEqual(Object.keys(invocation.env).sort(), ["CODEX_HOME", "HOME", "PATH", "TMPDIR"]);
+  assert.deepEqual(Object.keys(invocation.env).sort(), ["CODEX_HOME", "HOME", "LANG", "PATH", "TMPDIR"]);
+  assert.equal(invocation.env.LANG, "C.UTF-8");
   for (const value of ['model_reasoning_effort="xhigh"', 'service_tier="default"', 'web_search="disabled"', "read-only", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json"]) assert.ok(invocation.args.includes(value));
   assert.ok(invocation.args.includes(FALLBACK_MODEL));
   assert.ok(!invocation.args.includes("priority"));
+});
+
+test("Spark preserves its original tier selection and both models retain the UTF-8 locale fallback", () => {
+  for (const model of [PRIMARY_MODEL, FALLBACK_MODEL]) for (const lang of [undefined, "", "ru_RU.UTF-8"]) {
+    const invocation = codexInvocation({ model, workDir: "/empty", schemaPath: "/schema", resultPath: "/result",
+      env: { HOME: "/home/model", PATH: "/bin", RUNNER_TEMP: "/tmp", ...(lang === undefined ? {} : { LANG: lang }) } });
+    assert.equal(invocation.env.LANG, lang || "C.UTF-8");
+    assert.equal(invocation.args.includes('service_tier="default"'), model === FALLBACK_MODEL);
+    assert.ok(!invocation.args.some(arg => /service_tier=.*priority/u.test(arg)));
+  }
 });
 
 test("real child process gets isolated invocation and bounded timeout", async t => {
