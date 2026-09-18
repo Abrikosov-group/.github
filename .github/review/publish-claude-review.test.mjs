@@ -463,6 +463,26 @@ test("создаёт отдельное русское ревью GPT-5.3-Codex-
   assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
 });
 
+test("резерв публикуется как Sol и переиспользуется только с согласованным профилем", async () => {
+  const model = "gpt-5.6-sol";
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, model);
+  assert.match(payload.body, /GPT-5\.6 Sol, усилие `xhigh`/u);
+  assert.match(payload.body, /<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->/u);
+  assert.doesNotMatch(payload.body, /GPT-5\.3-Codex-Spark/u);
+  for (const profile of ["", "<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->"]) {
+    let reads = 0;
+    const needed = await withFetch(async () => {
+      reads++;
+      return reads === 1 ? jsonResponse(pullRequestFixture()) : jsonResponse([{
+        id: 100, user: { login: "github-actions[bot]" },
+        body: `${reviewMarker(BASE_SHA, HEAD_SHA, model)}\n${findingsMarker()}\n${profile}`,
+      }]);
+    }, () => reviewNeeded({ repository: "example/sawabook", pullNumber: 55,
+      baseSha: BASE_SHA, headSha: HEAD_SHA, reviewModel: model, token: "test-token" }));
+    assert.equal(needed, profile === "");
+  }
+});
+
 test("читает структурированный результат Codex из доверенного файла", async () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "organizational-review-json-"));
   const reviewPath = join(temporaryDirectory, "review.json");

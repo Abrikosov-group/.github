@@ -91,6 +91,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: false
         type: boolean
+      codex_fallback_enabled:
+        description: Однократный резерв GPT-5.6 Sol xhigh при техническом сбое Spark
+        required: false
+        default: false
+        type: boolean
       review_gate_context:
         description: Имя commit status двойного ревью; пустое отключает status
         required: false
@@ -581,6 +586,7 @@ jobs:
     outputs:
       review_needed: ${{ steps.input.outputs.needed }}
       blocking_findings: ${{ steps.input.outputs.blocking_findings }}
+      review_model: ${{ steps.input.outputs.review_model }}
       binary_files: ${{ steps.input.outputs.binary_files }}
       binary_summary: ${{ steps.input.outputs.binary_summary }}
       binary_manifest_sha256: ${{ steps.input.outputs.binary_manifest_sha256 }}
@@ -593,6 +599,7 @@ jobs:
       TRIGGER: ${{ needs.context.outputs.trigger }}
       REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
+      CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -701,15 +708,21 @@ jobs:
 
           if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
             marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
+            fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
             coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
             reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
             existing="$(jq -c \
               --arg marker "${marker}" \
+              --arg fallback_marker "${fallback_marker}" \
+              --arg fallback_enabled "${CODEX_FALLBACK_ENABLED:-false}" \
               --arg coverage_marker "${coverage_marker}" \
               --arg login "${REVIEW_PUBLISHER_LOGIN}" \
               '[.[][]? | select(
                 .user.login == $login and
-                ((.body // "") | contains($marker)) and
+                (((.body // "") | contains($marker)) or
+                  ($fallback_enabled == "true" and
+                   ((.body // "") | contains($fallback_marker)) and
+                   ((.body // "") | contains("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")))) and
                 ((.body // "") | contains($coverage_marker))
               )] | sort_by(.id) | last // null' \
               <<< "${reviews}")"
@@ -727,9 +740,14 @@ jobs:
                 add |
                 select(. <= 9007199254740991)
               ' <<< "${existing}")"; then
+                review_model='gpt-5.3-codex-spark'
+                if jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
+                  review_model='gpt-5.6-sol'
+                fi
+                echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
                 echo "needed=false" >> "${GITHUB_OUTPUT}"
                 echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
-                echo "Актуальное ревью Codex Spark для точного binary manifest уже существует"
+                echo "Актуальное ревью Codex (${review_model}) для точного binary manifest уже существует"
                 exit 0
               fi
               echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
@@ -832,6 +850,13 @@ jobs:
             exit 1
           fi
 
+      - name: Добавить доверенный контроллер Codex к артефакту
+        if: steps.input.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp _review_infra/.github/review/run-codex-review.mjs .review-input/codex/run-codex-review.mjs
+
       - name: Передать обезличенный вход ревью на защищённый Runner
         if: steps.input.outputs.needed == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -843,13 +868,16 @@ jobs:
           retention-days: 1
 
   analyze-codex:
-    name: Проанализировать PR с GPT-5.3-Codex-Spark
+    name: Проанализировать PR с Codex и разрешённым резервом
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.codex_runner_label }}
-    timeout-minutes: 25
+    timeout-minutes: ${{ inputs.codex_fallback_enabled && 45 || 25 }}
+    outputs:
+      review_model: ${{ steps.analyze.outputs.review_model }}
+      fallback_used: ${{ steps.analyze.outputs.fallback_used }}
     permissions:
       pull-requests: read
 
@@ -899,69 +927,29 @@ jobs:
             exit 1
           fi
 
-      - name: Выполнить изолированное ревью Spark без инструментов
+      - name: Выполнить изолированное ревью Codex без инструментов
+        id: analyze
         shell: bash
         env:
           REVIEW_ROOT: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
         run: |
           set -euo pipefail
+          node "${REVIEW_ROOT}/input/run-codex-review.mjs"
 
-          input_dir="${REVIEW_ROOT}/input"
-          output_dir="${REVIEW_ROOT}/output"
-          work_dir="${REVIEW_ROOT}/empty-workspace"
-          prompt_path="${input_dir}/prompt.txt"
-          schema_path="${input_dir}/review.schema.json"
-          result_path="${output_dir}/review.json"
-          codex_bin="$(command -v codex)"
-          codex_home="${CODEX_HOME:-${HOME}/.codex}"
-
-          test -f "${prompt_path}"
-          test -f "${schema_path}"
-          test -r "${codex_home}/auth.json"
-          mkdir -p "${output_dir}" "${work_dir}"
-
-          clean_env=(
-            "HOME=${HOME}"
-            "CODEX_HOME=${codex_home}"
-            "PATH=${PATH}"
-            "LANG=${LANG:-C.UTF-8}"
-            "TMPDIR=${RUNNER_TEMP}"
-          )
-          if [[ -n "${SSL_CERT_FILE:-}" ]]; then
-            clean_env+=("SSL_CERT_FILE=${SSL_CERT_FILE}")
-          fi
-          if [[ -n "${SSL_CERT_DIR:-}" ]]; then
-            clean_env+=("SSL_CERT_DIR=${SSL_CERT_DIR}")
-          fi
-
-          env -i "${clean_env[@]}" "${codex_bin}" exec \
-            --model gpt-5.3-codex-spark \
-            -c 'model_reasoning_effort="xhigh"' \
-            -c 'web_search="disabled"' \
-            --sandbox read-only \
-            --skip-git-repo-check \
-            --ephemeral \
-            --ignore-user-config \
-            --ignore-rules \
-            --disable shell_tool \
-            --disable apps \
-            --disable plugins \
-            --disable browser_use \
-            --disable computer_use \
-            --disable image_generation \
-            --disable multi_agent \
-            --disable skill_search \
-            --color never \
-            --cd "${work_dir}" \
-            --output-schema "${schema_path}" \
-            --output-last-message "${result_path}" \
-            - < "${prompt_path}"
-
-          jq -e '
-            type == "object" and
-            (keys == ["findings"]) and
-            (.findings | type == "array" and length <= 20)
-          ' "${result_path}" > /dev/null
+      - name: Сохранить запись раунда Codex
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-review-round-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}/output/round.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Передать результат доверенному издателю
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -984,7 +972,7 @@ jobs:
           fi
 
   publish-codex:
-    name: Опубликовать проверенное ревью Codex Spark
+    name: Опубликовать проверенное ревью Codex
     needs: [context, start-status, prepare-codex, analyze-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
@@ -1023,7 +1011,7 @@ jobs:
           name: codex-review-input
           path: .review-input/codex
 
-      - name: Получить результат Codex Spark
+      - name: Получить результат Codex
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: codex-review-output
@@ -1038,7 +1026,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Опубликовать атомарное ревью Codex Spark
+      - name: Опубликовать атомарное ревью Codex
         id: publish
         shell: bash
         env:
@@ -1046,7 +1034,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          REVIEW_MODEL: gpt-5.3-codex-spark
+          REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model }}
           REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/codex/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/codex/pull-request.diff
           BINARY_MANIFEST_PATH: ${{ github.workspace }}/.review-input/codex/binary-manifest.json
@@ -1581,6 +1569,8 @@ jobs:
       CODEX_PREPARE_RESULT: ${{ needs.prepare-codex.result }}
       CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
+      CODEX_REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
+      CODEX_FALLBACK_USED: ${{ needs.analyze-codex.outputs.fallback_used }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
       CODEX_PUBLISHED_BLOCKING_FINDINGS: ${{ needs.publish-codex.outputs.blocking_findings }}
       CODEX_REUSED_BLOCKING_FINDINGS: ${{ needs.prepare-codex.outputs.blocking_findings }}
@@ -1681,6 +1671,10 @@ jobs:
             exit 1
           fi
 
+          codex_model_label='GPT-5.3-Codex-Spark'
+          if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.6-sol" ]]; then
+            codex_model_label='GPT-5.6 Sol'
+          fi
           codex_ok=false
           if [[ "${MODE}" == "claude" ]]; then
             codex_ok=true
@@ -1689,13 +1683,17 @@ jobs:
             codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
-            codex_line="- ✅ GPT-5.3-Codex-Spark (\`xhigh\`) — актуальное ревью уже существует"
+            codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — актуальное ревью уже существует"
           elif [[ "${CODEX_ANALYZE_RESULT}" == "success" &&
                   "${CODEX_PUBLISH_RESULT}" == "success" ]]; then
             codex_ok=true
-            codex_line="- ✅ GPT-5.3-Codex-Spark (\`xhigh\`) — ревью опубликовано"
+            codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — ревью опубликовано"
           else
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — анализ или публикация завершились ошибкой"
+            codex_line="- ❌ Codex (\`xhigh\`) — анализ или публикация завершились ошибкой; попытки указаны в записи раунда"
+          fi
+
+          if [[ "${CODEX_FALLBACK_USED:-false}" == "true" ]]; then
+            codex_line="${codex_line}; однократный резерв после технического сбоя Spark, обычная скорость"
           fi
 
           claude_ok=false
@@ -1812,8 +1810,10 @@ jobs:
               gate_state='failure'
               if [[ "${binary_input_ok}" != "true" ]]; then
                 gate_description='Не удалось подтвердить безопасный вход моделей'
+              elif [[ "${blocking_findings}" != "0" ]]; then
+                gate_description='Найдены замечания P0–P2'
               else
-                gate_description='Ревью не завершено либо найдены P0–P2'
+                gate_description='Ревью не получено: техническая ошибка анализа или публикации'
               fi
             fi
             gh api --method POST \

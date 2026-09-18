@@ -24,6 +24,11 @@ const REVIEW_MODELS = new Map([
     marker: "claude-review",
     reviewer: "Claude",
   }],
+  ["gpt-5.6-sol", {
+    displayName: "GPT-5.6 Sol",
+    marker: "codex-review",
+    reviewer: "Codex",
+  }],
   ["gpt-5.3-codex-spark", {
     displayName: "GPT-5.3-Codex-Spark",
     marker: "codex-review",
@@ -371,13 +376,14 @@ export function buildReviewPayload(
     commit_id: headSha,
     body: [
       reviewMarker(baseSha, headSha, reviewModel),
+      ...(reviewModel === "gpt-5.6-sol" ? ["<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->"] : []),
       `<!-- review-findings:P0=${counts.P0};P1=${counts.P1};P2=${counts.P2} -->`,
       ...(binaryManifest === null
         ? []
         : [`<!-- review-binary-coverage:sha256=${binaryManifest.binaryManifestSha256};files=${binaryManifest.files.length} -->`]),
       `### Ревью ${model.reviewer}`,
       "",
-      `**Модель:** ${model.displayName}, усилие \`xhigh\`.`,
+      `**Модель:** ${model.displayName}, усилие \`xhigh\`${reviewModel === "gpt-5.6-sol" ? ", обычная скорость" : ""}.`,
       "",
       summary,
       ...unanchoredSection,
@@ -607,6 +613,7 @@ async function findExistingReview({
       if (
         review.user?.login === publisherLogin &&
         review.body?.includes(marker) &&
+        (!marker.endsWith(":gpt-5.6-sol -->") || review.body.includes("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")) &&
         (latestReview === null || review.id > latestReview.id)
       ) {
         latestReview = review;
