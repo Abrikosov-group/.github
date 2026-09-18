@@ -14,7 +14,7 @@ const MAX_RESULT = 128 * 1024;
 // Only structured CLI transport errors qualify. Model text, stderr echoes and
 // invalid reports cannot request another model or a second review.
 export function fallbackReason({ code, signal, events, reportPresent, timedOut }) {
-  if (reportPresent || (signal && !timedOut) || code === 0) return null;
+  if (reportPresent || (signal && !timedOut) || (code === 0 && !timedOut)) return null;
   const errors = [];
   for (const line of events.split("\n")) {
     let event;

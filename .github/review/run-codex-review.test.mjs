@@ -59,6 +59,23 @@ test("a negative primary report is accepted without a replacement review", async
   assert.deepEqual(JSON.parse(await readFile(join(h.root, "output/review.json"), "utf8")).findings, findings);
 });
 
+test("timeout followed by a graceful zero exit still reserves one fallback", async t => {
+  const h = await harness(t);
+  const audit = await runRound({ ...h.options, execute: async r => {
+    if (r.model === PRIMARY_MODEL) {
+      h.calls.push(r);
+      return { code: 0, signal: null, timedOut: true, events: "" };
+    }
+    return h.success(r);
+  } });
+  assert.deepEqual(h.calls.map(r => r.model), [PRIMARY_MODEL, FALLBACK_MODEL]);
+  assert.equal(audit.attempts[1].reason, "primary_timeout");
+  assert.equal(audit.acceptedModel, FALLBACK_MODEL);
+  assert.equal(fallbackReason({ code: 0, timedOut: false, events: "", reportPresent: false }), null);
+  assert.equal(fallbackReason({ code: 0, timedOut: true, events: "", reportPresent: true }), null);
+  assert.equal(fallbackReason({ code: 0, timedOut: true, events: JSON.stringify({ type: "error", status: 429, message: "Account limit" }) }), null);
+});
+
 for (const [name, result] of [
   ["account quota", { code: 1, events: JSON.stringify({ type: "error", status: 429, message: "usage limit reached" }) }],
   ["authentication", { code: 1, events: JSON.stringify({ type: "error", status: 401, message: "Unauthorized" }) }],
@@ -172,6 +189,18 @@ test("real child process gets isolated invocation and bounded timeout", async t 
   const result = await executeCodex({ model: FALLBACK_MODEL, binary, workDir, schemaPath: "/unused", resultPath: "/unused", prompt: Buffer.from("input"),
     timeoutMs: 50, signal: new AbortController().signal, env: { ...process.env, RUNNER_TEMP: h.root, GH_TOKEN: "should-not-leak" } });
   assert.equal(result.timedOut, true);
+  assert.equal(fallbackReason({ ...result, reportPresent: false }), "primary_timeout");
+});
+
+test("a real child that handles SIGTERM can return zero after the controller timeout", async t => {
+  const h = await harness(t); const workDir = join(h.root, "work"); await mkdir(workDir);
+  const binary = join(h.root, "fake-codex");
+  await writeFile(binary, `#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n`);
+  await chmod(binary, 0o700);
+  const result = await executeCodex({ model: PRIMARY_MODEL, binary, workDir, schemaPath: "/unused", resultPath: "/unused", prompt: Buffer.from("input"),
+    timeoutMs: 500, signal: new AbortController().signal, env: { ...process.env, RUNNER_TEMP: h.root } });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.code, 0);
   assert.equal(fallbackReason({ ...result, reportPresent: false }), "primary_timeout");
 });
 
