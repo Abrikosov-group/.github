@@ -10,20 +10,74 @@ const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL]);
 const SHA = /^[a-f0-9]{40}$/u;
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const MAX_RESULT = 128 * 1024;
+const DIAGNOSTIC_CODES = new Set([
+  "model_not_found", "model_not_available", "unsupported_model", "invalid_request_error",
+  "invalid_api_key", "authentication_error", "unauthorized", "permission_denied",
+  "insufficient_quota", "usage_limit_reached", "model_rate_limit_exceeded", "rate_limit_exceeded",
+  "context_length_exceeded", "invalid_prompt", "invalid_schema", "server_error",
+  "internal_server_error", "service_unavailable", "connection_reset", "connection_error",
+]);
+const LAUNCH_CODES = new Set(["ENOENT", "EACCES", "EPERM", "ENOEXEC", "E2BIG"]);
+
+function structuredErrors(events = "") {
+  const errors = [];
+  const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  for (const line of events.split("\n")) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (!object(event) || !["error", "turn.failed"].includes(event.type)) continue;
+    const error = object(event.error) ? event.error : event;
+    errors.push({ ...error, status: error.status ?? event.status });
+  }
+  return errors;
+}
+
+// Only fixed categories/codes and bounded numbers leave the process. Provider
+// messages, arbitrary error fields, stderr and model text never enter the audit.
+export function attemptDiagnostic({ model, result, report }) {
+  const error = structuredErrors(result.events).at(-1);
+  const code = typeof error?.code === "string" ? error.code : error?.type;
+  const message = typeof error?.message === "string" ? error.message : "";
+  const description = `${typeof code === "string" ? code : ""} ${message}`;
+  const validStatus = value => Number.isInteger(value) && value >= 400 && value <= 599;
+  const textStatus = Number(message.match(/(?:unexpected status|HTTP(?: status)?)\s+(\d{3})\b/iu)?.[1]);
+  const httpStatus = validStatus(error?.status) ? error.status : validStatus(textStatus) ? textStatus : null;
+  const modelLimit = error?.scope === "model" && error.model === model
+    && (httpStatus === 429 || code === "model_rate_limit_exceeded");
+  let category;
+  if (result.code === 0 && !result.signal && !result.timedOut && !result.overflow && report.valid) category = "accepted";
+  else if (result.overflow) category = "output_limit";
+  else if (result.timedOut) category = "timeout";
+  else if (result.signal) category = "signal_termination";
+  else if (report.present && !report.valid) category = "invalid_report";
+  else if ([401, 403].includes(httpStatus) || /authentication|unauthori[sz]ed|invalid.api.key|permission.denied/iu.test(description)) category = "authentication";
+  else if (/insufficient.quota|usage.limit|credit|billing/iu.test(description)
+    || ((httpStatus === 429 || code === "rate_limit_exceeded") && !modelLimit)) category = "shared_quota";
+  else if (modelLimit) category = "model_limit";
+  else if (/context.{0,30}(window|length|limit)|input.{0,30}(large|invalid|limit)|invalid.{0,10}(schema|prompt)/iu.test(description)) category = "invalid_input";
+  else if ((description.includes(model) && /not supported|not available|does not exist|model.not.found/iu.test(description))
+    || ["model_not_found", "model_not_available", "unsupported_model"].includes(code)) category = "model_unavailable";
+  else if (/server_error|internal_server_error|service_unavailable|connection_reset|connection_error/iu.test(description)
+    || [500, 502, 503, 504].includes(httpStatus)) category = "provider_failure";
+  else category = result.code === 0 ? "missing_report" : "process_failed";
+  // A CLI argument/configuration failure may happen before JSON streaming starts.
+  // Stderr can refine an otherwise unknown failure, never request a fallback.
+  const stderr = typeof result.stderr === "string" ? result.stderr : "";
+  if (!error && category === "process_failed") {
+    if (/error:\s*(?:unexpected argument|invalid value|unrecognized (?:argument|option)|unknown (?:argument|option))|(?:failed|unable) to (?:load|parse) (?:the )?(?:configuration|config)|error parsing.{0,30}(?:config|overrides)/iu.test(stderr)) category = "cli_configuration";
+    else if (/certificate verify failed|invalid peer certificate|certificate.{0,60}unknown issuer/iu.test(stderr)) category = "tls_failure";
+  }
+  return { category, httpStatus: category === "accepted" ? null : httpStatus,
+    errorCode: category !== "accepted" && DIAGNOSTIC_CODES.has(code) ? code : null,
+    timedOut: Boolean(result.timedOut), outputOverflow: Boolean(result.overflow),
+    reportPresent: report.present, reportValid: report.valid, stderrPresent: stderr.length > 0 };
+}
 
 // Only structured CLI transport errors qualify. Model text, stderr echoes and
 // invalid reports cannot request another model or a second review.
 export function fallbackReason({ code, signal, events, reportPresent, timedOut }) {
   if (reportPresent || (signal && !timedOut) || (code === 0 && !timedOut)) return null;
-  const errors = [];
-  for (const line of events.split("\n")) {
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    if (event.type === "error" || event.type === "turn.failed") {
-      const error = event.error ?? event;
-      errors.push({ ...error, status: error.status ?? event.status });
-    }
-  }
+  const errors = structuredErrors(events);
   const modelLimit = e => e.scope === "model" && e.model === PRIMARY_MODEL
     && (e.status === 429 || e.code === "model_rate_limit_exceeded");
   // Access and shared quota failures take precedence over a model-specific one.
@@ -70,6 +124,7 @@ export async function executeCodex({ model, workDir, schemaPath, resultPath, pro
     const child = spawn(binary, invocation.args, { env: invocation.env, cwd: workDir,
       detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
     let events = "";
+    let stderr = "";
     let bytes = 0;
     let timedOut = false;
     let overflow = false;
@@ -86,9 +141,11 @@ export async function executeCodex({ model, workDir, schemaPath, resultPath, pro
     const cancel = () => terminate();
     signal.addEventListener("abort", cancel, { once: true });
     const collect = (chunk, stdout) => {
+      if (overflow) return;
       bytes += chunk.length;
       if (bytes > MAX_OUTPUT) { overflow = true; terminate(); return; }
       if (stdout) events += chunk.toString("utf8");
+      else stderr += chunk.toString("utf8");
     };
     child.stdout.on("data", chunk => collect(chunk, true));
     child.stderr.on("data", chunk => collect(chunk, false));
@@ -98,7 +155,7 @@ export async function executeCodex({ model, workDir, schemaPath, resultPath, pro
     child.once("error", error => { cleanup(); reject(error); });
     child.once("close", (code, exitSignal) => {
       cleanup();
-      resolveResult({ code, signal: exitSignal, events, timedOut, overflow });
+      resolveResult({ code, signal: exitSignal, events, stderr, timedOut, overflow });
     });
   });
 }
@@ -150,7 +207,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   const claim = await open(join(outputDir, "round.claim"), "wx", 0o600);
   await claim.writeFile(JSON.stringify({ snapshot, inputHash }));
   await claim.close();
-  const audit = { version: 1, snapshot, inputHash, status: "claimed", attempts: [],
+  const audit = { version: 2, snapshot, inputHash, status: "claimed", attempts: [],
     fallbackReserved: false, acceptedModel: null, failure: null };
   const auditPath = join(outputDir, "round.json");
   const persist = async () => {
@@ -179,11 +236,21 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     audit.status = "running";
     await persist(); // Reservation precedes launch and survives an uncertain launch.
     await guard();
-    const result = await execute({ model, workDir, schemaPath, resultPath, prompt, signal });
+    let result;
+    try {
+      result = await execute({ model, workDir, schemaPath, resultPath, prompt, signal });
+    } catch (error) {
+      record.status = "interrupted";
+      record.diagnostic = { category: "execution_failed",
+        errorCode: LAUNCH_CODES.has(error?.code) ? error.code : null };
+      await persist();
+      throw error;
+    }
     record.status = "finished";
     record.exitCode = result.code;
     record.signal = result.signal ?? null;
     const report = await reportAt(resultPath);
+    record.diagnostic = attemptDiagnostic({ model, result, report });
     await persist();
     await guard();
     if (result.code === 0 && !result.signal && !result.timedOut && !result.overflow && report.valid) {
