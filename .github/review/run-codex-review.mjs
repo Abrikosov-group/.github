@@ -48,7 +48,7 @@ export function attemptDiagnostic({ model, result, report }) {
   if (result.code === 0 && !result.signal && !result.timedOut && !result.overflow && report.valid) category = "accepted";
   else if (result.overflow) category = "output_limit";
   else if (result.timedOut) category = "timeout";
-  else if (result.signal) category = "cancelled";
+  else if (result.signal) category = "signal_termination";
   else if (report.present && !report.valid) category = "invalid_report";
   else if ([401, 403].includes(httpStatus) || /authentication|unauthori[sz]ed|invalid.api.key|permission.denied/iu.test(description)) category = "authentication";
   else if (/insufficient.quota|usage.limit|credit|billing/iu.test(description) || (httpStatus === 429 && !modelLimit)) category = "shared_quota";

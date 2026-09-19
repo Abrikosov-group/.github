@@ -148,7 +148,7 @@ test("audit distinguishes terminal transport errors, process limits and invalid 
     [error({ message: `unexpected status 400 Bad Request: The '${FALLBACK_MODEL}' model is not supported.` }), {}, "model_unavailable", 400, null],
     [{ code: 0, timedOut: true, events: "" }, {}, "timeout", null, null],
     [{ code: 1, overflow: true, events: "" }, {}, "output_limit", null, null],
-    [{ code: null, signal: "SIGTERM", events: "" }, {}, "cancelled", null, null],
+    [{ code: null, signal: "SIGTERM", events: "" }, {}, "signal_termination", null, null],
     [error({ status: 400 }), { present: true, valid: false }, "invalid_report", 400, null],
     [{ code: 0, events: "" }, {}, "missing_report", null, null],
     [{ code: 1, events: "" }, {}, "process_failed", null, null],
@@ -206,6 +206,32 @@ test("unknown launch outcome retains a safe code and consumes the reserved fallb
   assert.ok(!JSON.stringify(audit).includes("private filesystem path"));
   await assert.rejects(runRound({ ...h.options, execute: h.success }), /EEXIST/u);
   assert.equal(h.calls.length, 2);
+});
+
+test("unexpected process signals are distinct from an explicit round cancellation", async t => {
+  for (const signal of ["SIGSEGV", "SIGABRT", "SIGKILL"]) {
+    const h = await harness(t);
+    await assert.rejects(runRound({ ...h.options, execute: async r => {
+      h.calls.push(r);
+      return { code: null, signal, events: "" };
+    } }));
+    const audit = await h.audit();
+    assert.equal(audit.status, "unavailable");
+    assert.equal(audit.attempts[0].signal, signal);
+    assert.equal(audit.attempts[0].diagnostic.category, "signal_termination");
+    assert.equal(audit.fallbackReserved, false);
+    assert.equal(h.calls.length, 1);
+  }
+  const h = await harness(t);
+  const controller = new AbortController();
+  await assert.rejects(runRound({ ...h.options, signal: controller.signal, execute: async () => {
+    controller.abort();
+    return { code: null, signal: "SIGTERM", events: "" };
+  } }));
+  const audit = await h.audit();
+  assert.equal(audit.status, "cancelled");
+  assert.equal(audit.attempts[0].diagnostic.category, "signal_termination");
+  assert.equal(audit.fallbackReserved, false);
 });
 
 test("disabled consumers and rerun attempts do not enter fallback", async t => {
