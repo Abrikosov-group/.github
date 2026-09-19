@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertCurrentPR, codexInvocation, executeCodex, fallbackReason, runRound,
+import { assertCurrentPR, attemptDiagnostic, codexInvocation, executeCodex, fallbackReason, runRound,
   PRIMARY_MODEL, FALLBACK_MODEL } from "./run-codex-review.mjs";
 
 const snapshot = { repository: "example/repo", pr: 1, base: "a".repeat(40), head: "b".repeat(40), runId: "12", runAttempt: 1 };
@@ -109,6 +109,105 @@ test("fallback failure terminates the chain; primary Sol does not retry Sol", as
   }
 });
 
+test("failed Sol retains its own safe diagnosis and never launches a third attempt", async t => {
+  const h = await harness(t);
+  const secret = "test-only-sensitive-content";
+  await assert.rejects(runRound({ ...h.options, execute: async r => {
+    h.calls.push(r);
+    if (r.model === PRIMARY_MODEL) return unavailable;
+    return { code: 1, events: JSON.stringify({ type: "turn.failed", error: {
+      status: 400, code: "invalid_request_error",
+      message: `The '${FALLBACK_MODEL}' model is not supported. ${secret}`,
+      request: secret, headers: { authorization: secret },
+    } }) };
+  } }));
+  const audit = await h.audit();
+  assert.deepEqual(h.calls.map(r => r.model), [PRIMARY_MODEL, FALLBACK_MODEL]);
+  assert.equal(audit.failure, "fallback_unavailable");
+  assert.equal(audit.acceptedModel, null);
+  assert.equal(audit.attempts[1].previousId, audit.attempts[0].id);
+  assert.equal(audit.attempts[1].reason, "primary_model_unavailable");
+  assert.deepEqual(audit.attempts[1].diagnostic, {
+    category: "model_unavailable", httpStatus: 400, errorCode: "invalid_request_error",
+    timedOut: false, outputOverflow: false, reportPresent: false, reportValid: false, stderrPresent: false,
+  });
+  assert.ok(!JSON.stringify(audit).includes(secret));
+  await assert.rejects(runRound({ ...h.options, execute: h.success }), /EEXIST/u);
+  assert.equal(h.calls.length, 2);
+});
+
+test("audit distinguishes terminal transport errors, process limits and invalid reports", () => {
+  const error = fields => ({ code: 1, events: JSON.stringify({ type: "turn.failed", error: fields }) });
+  const cases = [
+    [error({ status: 401, code: "invalid_api_key" }), {}, "authentication", 401, "invalid_api_key"],
+    [error({ status: 403, message: "Unauthorized" }), {}, "authentication", 403, null],
+    [error({ status: 429, code: "insufficient_quota" }), {}, "shared_quota", 429, "insufficient_quota"],
+    [error({ status: 429, scope: "model", model: FALLBACK_MODEL, code: "model_rate_limit_exceeded" }), {}, "model_limit", 429, "model_rate_limit_exceeded"],
+    [error({ status: 503, code: "service_unavailable" }), {}, "provider_failure", 503, "service_unavailable"],
+    [error({ code: "context_length_exceeded" }), {}, "invalid_input", null, "context_length_exceeded"],
+    [error({ message: `unexpected status 400 Bad Request: The '${FALLBACK_MODEL}' model is not supported.` }), {}, "model_unavailable", 400, null],
+    [{ code: 0, timedOut: true, events: "" }, {}, "timeout", null, null],
+    [{ code: 1, overflow: true, events: "" }, {}, "output_limit", null, null],
+    [{ code: null, signal: "SIGTERM", events: "" }, {}, "cancelled", null, null],
+    [error({ status: 400 }), { present: true, valid: false }, "invalid_report", 400, null],
+    [{ code: 0, events: "" }, {}, "missing_report", null, null],
+    [{ code: 1, events: "" }, {}, "process_failed", null, null],
+    [{ code: 1, events: "", stderr: "error: invalid value 'private-value' for configuration" }, {}, "cli_configuration", null, null],
+    [{ code: 1, events: "", stderr: "invalid peer certificate: UnknownIssuer" }, {}, "tls_failure", null, null],
+  ];
+  for (const [result, report, category, status, code] of cases) {
+    const diagnostic = attemptDiagnostic({ model: FALLBACK_MODEL, result, report: { present: false, valid: false, ...report } });
+    assert.equal(diagnostic.category, category);
+    assert.equal(diagnostic.httpStatus, status);
+    assert.equal(diagnostic.errorCode, code);
+    assert.equal(diagnostic.timedOut, Boolean(result.timedOut));
+    assert.equal(diagnostic.outputOverflow, Boolean(result.overflow));
+    assert.equal(diagnostic.stderrPresent, Boolean(result.stderr));
+  }
+});
+
+test("diagnostics ignore quoted errors and malformed events, and use the terminal CLI event", () => {
+  const secret = "private-provider-payload";
+  const diagnose = (events, extra = {}) => attemptDiagnostic({ model: FALLBACK_MODEL,
+    result: { code: 1, events, ...extra }, report: { present: false, valid: false } });
+  const quoted = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: unavailable.events } });
+  assert.equal(diagnose(`null\n42\n[]\n{broken\n${quoted}`).category, "process_failed");
+  const events = [
+    { type: "error", status: 503, code: "service_unavailable" },
+    { type: "turn.failed", status: 400, error: { code: "invalid_schema", message: secret } },
+  ].map(JSON.stringify).join("\n");
+  const diagnostic = diagnose(events, { stderr: `error: invalid value '${secret}'` });
+  assert.equal(diagnostic.category, "invalid_input");
+  assert.equal(diagnostic.httpStatus, 400);
+  assert.equal(diagnostic.errorCode, "invalid_schema");
+  assert.ok(!JSON.stringify(diagnostic).includes(secret));
+  const arbitrary = diagnose(JSON.stringify({ type: "error", status: secret, code: secret, message: secret }));
+  assert.equal(arbitrary.category, "process_failed");
+  assert.equal(arbitrary.httpStatus, null);
+  assert.equal(arbitrary.errorCode, null);
+  assert.ok(!JSON.stringify(arbitrary).includes(secret));
+  const accepted = attemptDiagnostic({ model: FALLBACK_MODEL, result: { code: 0, events }, report: { present: true, valid: true } });
+  assert.equal(accepted.category, "accepted");
+  assert.equal(accepted.httpStatus, null);
+  assert.equal(accepted.errorCode, null);
+});
+
+test("unknown launch outcome retains a safe code and consumes the reserved fallback", async t => {
+  const h = await harness(t);
+  await assert.rejects(runRound({ ...h.options, execute: async r => {
+    h.calls.push(r);
+    if (r.model === PRIMARY_MODEL) return unavailable;
+    throw Object.assign(new Error("private filesystem path and token"), { code: "ENOENT" });
+  } }));
+  const audit = await h.audit();
+  assert.equal(audit.status, "interrupted");
+  assert.equal(audit.fallbackReserved, true);
+  assert.deepEqual(audit.attempts[1].diagnostic, { category: "execution_failed", errorCode: "ENOENT" });
+  assert.ok(!JSON.stringify(audit).includes("private filesystem path"));
+  await assert.rejects(runRound({ ...h.options, execute: h.success }), /EEXIST/u);
+  assert.equal(h.calls.length, 2);
+});
+
 test("disabled consumers and rerun attempts do not enter fallback", async t => {
   for (const options of [{ fallbackEnabled: false }, { snapshot: { ...snapshot, runAttempt: 2 } }]) {
     const h = await harness(t);
@@ -202,6 +301,37 @@ test("real child process gets isolated invocation and bounded timeout", async t 
     timeoutMs: 50, signal: new AbortController().signal, env: { ...process.env, RUNNER_TEMP: h.root, GH_TOKEN: "should-not-leak" } });
   assert.equal(result.timedOut, true);
   assert.equal(fallbackReason({ ...result, reportPresent: false }), "primary_timeout");
+});
+
+test("real subprocess stderr is bounded and produces only safe audit fields", async t => {
+  for (const overflow of [false, true]) {
+    const h = await harness(t);
+    const binary = join(h.root, "fake-codex");
+    const sensitive = "PRIVATE_STDERR_CANARY";
+    await writeFile(binary, `#!/usr/bin/env node
+const args=process.argv.slice(2); const model=args[args.indexOf('--model')+1];
+process.stdin.resume(); process.stdin.on('end',()=>{
+if(model===${JSON.stringify(PRIMARY_MODEL)}) console.log(${JSON.stringify(unavailable.events)});
+else process.stderr.write(${overflow ? `'${sensitive}'.repeat(200000)` : JSON.stringify(`error: invalid value '${sensitive}' for '--service-tier'`)});
+process.exitCode=1;
+});\n`);
+    await chmod(binary, 0o700);
+    await assert.rejects(runRound({ ...h.options, execute: async r => {
+      h.calls.push(r);
+      const result = await executeCodex({ ...r, binary, timeoutMs: 5000,
+        env: { ...process.env, RUNNER_TEMP: h.root } });
+      assert.ok(Buffer.byteLength(result.events) + Buffer.byteLength(result.stderr) <= 2 * 1024 * 1024);
+      return result;
+    } }));
+    const audit = await h.audit();
+    assert.deepEqual(h.calls.map(r => r.model), [PRIMARY_MODEL, FALLBACK_MODEL]);
+    assert.equal(audit.attempts[1].diagnostic.category, overflow ? "output_limit" : "cli_configuration");
+    assert.equal(audit.attempts[1].diagnostic.outputOverflow, overflow);
+    assert.equal(audit.attempts[1].diagnostic.stderrPresent, true);
+    assert.equal(audit.failure, "fallback_unavailable");
+    assert.ok(!JSON.stringify(audit).includes(sensitive));
+    assert.equal(fallbackReason({ code: 1, events: "", stderr: unavailable.events }), null);
+  }
 });
 
 test("a real child that handles SIGTERM can return zero after the controller timeout", async t => {
