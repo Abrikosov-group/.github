@@ -13,6 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(".github/workflows/review-all.yml", "utf8");
+const codexController = readFileSync(".github/review/run-codex-review.mjs", "utf8");
 const caller = readFileSync("workflow-templates/review-all.yml", "utf8");
 const organizationCaller = readFileSync(".github/workflows/review-all-trigger.yml", "utf8");
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
@@ -378,7 +379,7 @@ function statusEnv(overrides = {}) {
 }
 
 test("организационный workflow запускает только Codex и Claude", () => {
-  assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
+  assert.match(codexController, /PRIMARY_MODEL = "gpt-5\.3-codex-spark"/u);
   assert.match(workflow, /claude-sonnet-5/u);
   assert.doesNotMatch(workflow, /@codex review/u);
   assert.doesNotMatch(workflow, /\/gemini\s+review/iu);
@@ -392,10 +393,10 @@ test("Codex использует подписочный Spark xhigh на нас�
   assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);
   assert.match(workflow, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_codex_runner_name \}\}/u);
   assert.match(workflow, /codex login status/u);
-  assert.match(workflow, /--model gpt-5\.3-codex-spark/u);
-  assert.match(workflow, /model_reasoning_effort="xhigh"/u);
-  assert.match(workflow, /web_search="disabled"/u);
-  assert.match(workflow, /REVIEW_MODEL: gpt-5\.3-codex-spark/u);
+  assert.match(codexController, /PRIMARY_MODEL = "gpt-5\.3-codex-spark"/u);
+  assert.match(codexController, /model_reasoning_effort="xhigh"/u);
+  assert.match(codexController, /web_search="disabled"/u);
+  assert.match(workflow, /REVIEW_MODEL: \$\{\{ needs\.analyze-codex\.outputs\.review_model \}\}/u);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
   assert.match(
     workflow,
@@ -565,24 +566,25 @@ test("центральный caller разрешает status-права reusabl
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
   const codexJob = workflow.match(/\n  analyze-codex:[\s\S]*?(?=\n  publish-codex:)/u)?.[0];
   const modelStep = codexJob?.match(
-    /\n      - name: Выполнить изолированное ревью Spark без инструментов[\s\S]*?(?=\n      - name:)/u,
+    /\n      - name: Выполнить изолированное ревью Codex без инструментов[\s\S]*?(?=\n      - name:)/u,
   )?.[0];
 
   assert.ok(codexJob);
   assert.ok(modelStep);
   assert.match(codexJob, /permissions:\n\s+pull-requests: read/u);
-  assert.match(modelStep, /env -i/u);
-  assert.match(modelStep, /--ignore-user-config/u);
-  assert.match(modelStep, /--ignore-rules/u);
-  assert.match(modelStep, /--disable shell_tool/u);
-  assert.match(modelStep, /--disable plugins/u);
+  assert.match(modelStep, /node "\$\{REVIEW_ROOT\}\/input\/run-codex-review\.mjs"/u);
+  assert.match(codexController, /--ignore-user-config/u);
+  assert.match(codexController, /--ignore-rules/u);
+  assert.match(codexController, /"shell_tool"/u);
+  assert.match(codexController, /"plugins"/u);
   assert.doesNotMatch(codexJob, /actions\/checkout/u);
-  assert.doesNotMatch(modelStep, /GH_TOKEN|GITHUB_TOKEN/u);
+  assert.match(codexController, /env: invocation\.env/u);
+  assert.doesNotMatch(codexController.match(/const cleanEnv = \{\};[\s\S]*?const args/u)?.[0] ?? "", /GH_TOKEN|GITHUB_TOKEN/u);
 });
 
 test("Codex публикуется только после схемы и доверенного издателя", () => {
-  assert.match(workflow, /--output-schema "\$\{schema_path\}"/u);
-  assert.match(workflow, /--output-last-message "\$\{result_path\}"/u);
+  assert.match(codexController, /"--output-schema", schemaPath/u);
+  assert.match(codexController, /"--output-last-message", resultPath/u);
   assert.match(workflow, /REVIEW_JSON_FILE:/u);
   assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:gpt-5\.3-codex-spark/u);
   assert.match(workflow, /node _review_infra\/\.github\/review\/publish-claude-review\.mjs/u);
@@ -624,7 +626,7 @@ test("перед каждой моделью повторно требует о�
     {
       stepName: "Повторно проверить PR перед запуском Codex",
       jobId: "analyze-codex",
-      modelStep: "Выполнить изолированное ревью Spark без инструментов",
+      modelStep: "Выполнить изолированное ревью Codex без инструментов",
     },
     {
       stepName: "Повторно проверить PR перед запуском Claude",
@@ -1260,7 +1262,7 @@ test("дорогие этапы ревью ограничены по време�
   assert.ok(analyzeCodex);
   assert.ok(analyzeClaude);
   assert.match(prepareCodex, /timeout-minutes: 10/u);
-  assert.match(analyzeCodex, /timeout-minutes: 25/u);
+  assert.match(analyzeCodex, /timeout-minutes: \$\{\{ inputs\.codex_fallback_enabled && 45 \|\| 25 \}\}/u);
   assert.match(analyzeClaude, /timeout-minutes: 25/u);
 });
 
@@ -2060,4 +2062,44 @@ test("Draft opt-in сохраняет актуальный итог и пров�
   assert.notEqual(changed.status, 0);
   assert.match(changed.ghLog, /Результат ИИ-ревью устарел/u);
   assert.match(changed.ghLog, /--raw-field state=failure/u);
+});
+
+test("Sol повторно используется только при opt-in и совпадении профиля", () => {
+  const baseSha = "a".repeat(40), headSha = "b".repeat(40);
+  for (const enabled of ["true", "false"]) for (const profile of ["", "<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->"]) {
+    const result = executeRunScript({
+      stepName: "Проверить дубликат и подготовить вход модели", ghMock: markerGhMock,
+      commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
+      env: { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", BASE_SHA: baseSha, HEAD_SHA: headSha,
+        TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: "github-actions[bot]", REUSE_EXISTING_REVIEWS: "true",
+        CODEX_FALLBACK_ENABLED: enabled, MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+        MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 110, user: { login: "github-actions[bot]" },
+          body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.6-sol -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}\n${profile}` }]]) },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, enabled === "true" && profile ? /^needed=false$/mu : /^needed=true$/mu);
+    if (enabled === "true" && profile) assert.match(result.outputs, /^review_model=gpt-5.6-sol$/mu);
+  }
+});
+
+test("итог показывает Sol и различает технический сбой и замечания", () => {
+  const common = { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", STATUS_COMMENT_ID: "99",
+    BASE_SHA: "a".repeat(40), HEAD_SHA: "b".repeat(40), MODE: "all",
+    RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1", REVIEW_GATE_CONTEXT: "Двойное ИИ-ревью",
+    CODEX_PREPARE_RESULT: "success", CODEX_REVIEW_NEEDED: "true", CODEX_ANALYZE_RESULT: "success", CODEX_PUBLISH_RESULT: "success",
+    CODEX_PUBLISHED_BLOCKING_FINDINGS: "0", CODEX_REVIEW_MODEL: "gpt-5.6-sol", CODEX_FALLBACK_USED: "true",
+    CLAUDE_ANALYZE_RESULT: "success", CLAUDE_REVIEW_NEEDED: "true", CLAUDE_PUBLISH_RESULT: "success", CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "0" };
+  const run = changes => executeRunScript({ stepName: "Показать результат обоих ревьюеров", ghMock: finishStatusGhMock, env: { ...common, ...changes } });
+  const success = run({});
+  assert.equal(success.status, 0, success.stderr);
+  assert.match(success.ghLog, /GPT-5\.6 Sol.*ревью опубликовано/u);
+  assert.match(success.ghLog, /state=success/u);
+  const failure = run({ CODEX_ANALYZE_RESULT: "failure", CODEX_PUBLISH_RESULT: "skipped", CODEX_PUBLISHED_BLOCKING_FINDINGS: "" });
+  assert.equal(failure.status, 0, failure.stderr);
+  assert.match(failure.ghLog, /state=failure/u);
+  assert.match(failure.ghLog, /Ревью не получено: техническая ошибка/u);
+  const findings = run({ CODEX_PUBLISHED_BLOCKING_FINDINGS: "1" });
+  assert.equal(findings.status, 0, findings.stderr);
+  assert.match(findings.ghLog, /state=failure/u);
+  assert.match(findings.ghLog, /Найдены замечания P0–P2/u);
 });
