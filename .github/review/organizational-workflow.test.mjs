@@ -405,7 +405,7 @@ test("Codex использует подписочный Spark xhigh на нас�
   assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
 });
 
-test("все jobs закреплены одновременно за runner group, label и точным именем", () => {
+test("jobs подписочных CLI и оркестрации закреплены за group, label и точным именем", () => {
   const serviceJobs = [
     "context",
     "start-status",
@@ -452,7 +452,46 @@ test("все jobs закреплены одновременно за runner grou
   }
 
   assert.doesNotMatch(workflow, /runs-on: \$\{\{ inputs\.[a-z_]+_runner_label \}\}/u);
-  assert.doesNotMatch(workflow, /runs-on: (?:ubuntu|windows|macos)-/u);
+  for (const jobId of [...serviceJobs, ...modelJobs.map(([jobId]) => jobId)]) {
+    assert.doesNotMatch(extractJob(workflow, jobId), /runs-on: (?:ubuntu|windows|macos)-/u);
+  }
+});
+
+test("DeepSeek изолирован от подписочных ролей и не добавляет ожидание в парный статус", () => {
+  const analyze = extractJob(workflow, "analyze-deepseek");
+  const publish = extractJob(workflow, "publish-deepseek");
+  assert.match(workflow, /deepseek_enabled:[\s\S]*?default: false\n\s+type: boolean/u);
+  assert.match(workflow, /DEEPSEEK_API_KEY:[\s\S]*?required: false/u);
+  assert.match(analyze, /if: inputs.deepseek_enabled && needs.context.outputs.mode == 'all'/u);
+  assert.match(analyze, /needs: \[context, start-status, prepare-codex\]/u);
+  assert.match(analyze, /runs-on: ubuntu-24\.04/u);
+  assert.doesNotMatch(analyze, /pull-requests: write|issues: write|contents: write|CLAUDE_CODE_OAUTH_TOKEN/u);
+  assert.match(analyze, /ref: \$\{\{ inputs.trusted_workflow_sha \}\}/u);
+  assert.doesNotMatch(analyze, /ref:.*head_sha|npm |\.\/pr-head|run-codex-review/u);
+  assert.match(publish, /if: needs.analyze-deepseek.outputs.state == 'completed'/u);
+  assert.doesNotMatch(publish, /DEEPSEEK_API_KEY/u);
+  assert.doesNotMatch(extractJob(workflow, "finish-status").split("    env:")[0], /deepseek/u);
+  assert.match(extractJob(workflow, "prepare-codex"), /if: steps.input.outputs.needed == 'true' \|\| inputs.deepseek_enabled/u);
+});
+
+test("повторно используемый Codex не запускается снова, но готовит полный вход третьей роли", () => {
+  const baseSha = "a".repeat(40), headSha = "b".repeat(40);
+  const result = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
+    env: {
+      REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", BASE_SHA: baseSha, HEAD_SHA: headSha,
+      TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: "github-actions[bot]", REUSE_EXISTING_REVIEWS: "true", DEEPSEEK_ENABLED: "true",
+      MOCK_PR_JSON: prFixture({ baseSha, headSha }),
+      MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 101, user: { login: "github-actions[bot]" },
+        body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}` }]]),
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.outputs, /^needed=false$/mu);
+  assert.doesNotMatch(result.outputs, /^needed=true$/mu);
+  assert.match(result.summary, /Итоговый prompt:/u);
 });
 
 test("безопасный вход Codex строится от доказанного merge base", () => {

@@ -96,6 +96,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: false
         type: boolean
+      deepseek_enabled:
+        description: Третье независимое ревью DeepSeek Flash max; отсутствие отчёта не блокирует
+        required: false
+        default: false
+        type: boolean
       review_gate_context:
         description: Имя commit status двойного ревью; пустое отключает status
         required: false
@@ -107,6 +112,9 @@ name: Организационное двойное ИИ-ревью
         default: ""
         type: string
     secrets:
+      DEEPSEEK_API_KEY:
+        description: API-ключ третьего ревьюера DeepSeek
+        required: false
       REVIEW_DISPATCH_TOKEN:
         description: Устаревший совместимый секрет; новое ревью его не использует
         required: false
@@ -121,6 +129,7 @@ permissions: {}
 
 env:
   REVIEW_DRAFTS: ${{ inputs.review_drafts }}
+  DEEPSEEK_ENABLED: ${{ inputs.deepseek_enabled }}
 
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
@@ -516,6 +525,9 @@ jobs:
             reviewers="- ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения Claude._'
           fi
+          if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
+            footer="${footer} DeepSeek Flash / max работает независимо; его отдельный отчёт и запись запуска доступны в журнале выполнения."
+          fi
 
           marker='<!-- organizational-review-status -->'
           head_short="${HEAD_SHA:0:12}"
@@ -706,6 +718,7 @@ jobs:
             echo 'BINARY_SUMMARY_EOF'
           } >> "${GITHUB_OUTPUT}"
 
+          codex_needed=true
           if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
             marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
             fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
@@ -745,15 +758,18 @@ jobs:
                   review_model='gpt-5.6-sol'
                 fi
                 echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
-                echo "needed=false" >> "${GITHUB_OUTPUT}"
+                codex_needed=false
                 echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
                 echo "Актуальное ревью Codex (${review_model}) для точного binary manifest уже существует"
-                exit 0
+                if [[ "${DEEPSEEK_ENABLED:-false}" != "true" ]]; then
+                  echo "needed=false" >> "${GITHUB_OUTPUT}"
+                  exit 0
+                fi
               fi
               echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
             fi
           fi
-          echo "needed=true" >> "${GITHUB_OUTPUT}"
+          echo "needed=${codex_needed}" >> "${GITHUB_OUTPUT}"
 
           jq -n '{
             type: "object",
@@ -858,7 +874,7 @@ jobs:
           cp _review_infra/.github/review/run-codex-review.mjs .review-input/codex/run-codex-review.mjs
 
       - name: Передать обезличенный вход ревью на защищённый Runner
-        if: steps.input.outputs.needed == 'true'
+        if: steps.input.outputs.needed == 'true' || inputs.deepseek_enabled
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: codex-review-input
@@ -866,6 +882,115 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+
+  analyze-deepseek:
+    name: Независимое ревью DeepSeek Flash max
+    needs: [context, start-status, prepare-codex]
+    if: inputs.deepseek_enabled && needs.context.outputs.mode == 'all'
+    # API-only analysis has no CLI subscription or protected self-hosted runner state.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      state: ${{ steps.review.outputs.state }}
+    steps:
+      - name: Получить доверенный контроллер DeepSeek
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.trusted_workflow_repository }}
+          ref: ${{ inputs.trusted_workflow_sha }}
+          path: _review_infra
+          persist-credentials: false
+      - name: Подготовить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Получить общий неизменяемый вход Codex и DeepSeek
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-review-input
+          path: .review-input/codex
+      - name: Выполнить один независимый запуск DeepSeek
+        id: review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
+          FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
+        run: |
+          mkdir -p .review-output
+          node _review_infra/.github/review/run-deepseek-review.mjs --kind c3 --github --input .review-input/codex --output .review-output/deepseek
+      - name: Сохранить отдельный результат и диагностику DeepSeek
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deepseek-review-output-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .review-output/deepseek
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Показать отдельный исход DeepSeek
+        if: always()
+        env:
+          RESULT: ${{ steps.review.outputs.state }}
+        run: |
+          echo "DeepSeek Flash / max: ${RESULT:-отчёт недоступен}. Отсутствие отчёта не является разрешением или запретом слияния; полученные замечания требуют разбора." >> "$GITHUB_STEP_SUMMARY"
+
+  publish-deepseek:
+    name: Опубликовать отдельное ревью DeepSeek
+    needs: [context, start-status, analyze-deepseek]
+    if: needs.analyze-deepseek.outputs.state == 'completed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Получить доверенный издатель DeepSeek
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.trusted_workflow_repository }}
+          ref: ${{ inputs.trusted_workflow_sha }}
+          path: _review_infra
+          persist-credentials: false
+      - name: Подготовить Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Получить исходный вход
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-review-input
+          path: .review-input/codex
+      - name: Получить отдельный отчёт DeepSeek
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: deepseek-review-output-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .review-output/deepseek
+      - name: Получить токен доверенного издателя
+        if: inputs.review_gate_app_client_id != ''
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.review_gate_app_client_id }}
+          private-key: ${{ secrets.REVIEW_GATE_APP_PRIVATE_KEY }}
+      - name: Проверить снимок и опубликовать отчёт DeepSeek
+        env:
+          GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          DEEPSEEK_INPUT: ${{ github.workspace }}/.review-input/codex
+          DEEPSEEK_OUTPUT: ${{ github.workspace }}/.review-output/deepseek
+          REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
+          FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
+        run: node _review_infra/.github/review/publish-deepseek-review.mjs
 
   analyze-codex:
     name: Проанализировать PR с Codex и разрешённым резервом
@@ -1768,6 +1893,10 @@ jobs:
             heading='### ❌ ИИ-ревью требует внимания'
           fi
 
+          deepseek_line=""
+          if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
+            deepseek_line='DeepSeek Flash / max: отдельная независимая роль. Её исход и отчёт смотрите в журнале выполнения; итоги и счётчик основной пары ниже её не включают. Полученные замечания третьей роли также требуют разбора.'
+          fi
           body="$(cat <<EOF
           ${marker}
           ${heading}
@@ -1777,6 +1906,7 @@ jobs:
           ${codex_line}
           ${claude_line}
           ${binary_input_line}
+          ${deepseek_line}
 
           ${binary_summary}
 
