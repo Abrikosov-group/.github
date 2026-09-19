@@ -51,7 +51,8 @@ export function attemptDiagnostic({ model, result, report }) {
   else if (result.signal) category = "signal_termination";
   else if (report.present && !report.valid) category = "invalid_report";
   else if ([401, 403].includes(httpStatus) || /authentication|unauthori[sz]ed|invalid.api.key|permission.denied/iu.test(description)) category = "authentication";
-  else if (/insufficient.quota|usage.limit|credit|billing/iu.test(description) || (httpStatus === 429 && !modelLimit)) category = "shared_quota";
+  else if (/insufficient.quota|usage.limit|credit|billing/iu.test(description)
+    || ((httpStatus === 429 || code === "rate_limit_exceeded") && !modelLimit)) category = "shared_quota";
   else if (modelLimit) category = "model_limit";
   else if (/context.{0,30}(window|length|limit)|input.{0,30}(large|invalid|limit)|invalid.{0,10}(schema|prompt)/iu.test(description)) category = "invalid_input";
   else if ((description.includes(model) && /not supported|not available|does not exist|model.not.found/iu.test(description))
