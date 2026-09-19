@@ -207,13 +207,42 @@ test("real child process gets isolated invocation and bounded timeout", async t 
 test("a real child that handles SIGTERM can return zero after the controller timeout", async t => {
   const h = await harness(t); const workDir = join(h.root, "work"); await mkdir(workDir);
   const binary = join(h.root, "fake-codex");
-  await writeFile(binary, `#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n`);
+  // Delay readiness beyond the former 500 ms deadline to exercise slow startup.
+  await writeFile(binary, `#!/bin/sh\nsleep 1\ntrap 'exit 0' TERM\n: > ready\nwhile :; do sleep 1; done\n`);
   await chmod(binary, 0o700);
-  const result = await executeCodex({ model: PRIMARY_MODEL, binary, workDir, schemaPath: "/unused", resultPath: "/unused", prompt: Buffer.from("input"),
-    timeoutMs: 500, signal: new AbortController().signal, env: { ...process.env, RUNNER_TEMP: h.root } });
-  assert.equal(result.timedOut, true);
-  assert.equal(result.code, 0);
-  assert.equal(fallbackReason({ ...result, reportPresent: false }), "primary_timeout");
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const controller = new AbortController();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const execution = executeCodex({ model: PRIMARY_MODEL, binary, workDir, schemaPath: "/unused", resultPath: "/unused", prompt: Buffer.from("input"),
+    timeoutMs: 500, signal: controller.signal, env: { ...process.env, RUNNER_TEMP: h.root } });
+  let watchdog;
+  const deadline = new Promise((_, reject) => {
+    watchdog = realSetTimeout(() => reject(new Error("SIGTERM fixture did not complete within 10 seconds")), 10_000);
+  });
+  try {
+    // Real child I/O continues while only the controller's timeout clock is paused.
+    const ready = async () => {
+      while (!controller.signal.aborted) {
+        try { await readFile(join(workDir, "ready")); return; }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        await new Promise(resolve => realSetTimeout(resolve, 10));
+      }
+    };
+    await Promise.race([ready(), deadline, execution.then(() => { throw new Error("SIGTERM fixture exited before the timeout"); })]);
+    t.mock.timers.tick(500);
+    const result = await Promise.race([execution, deadline]);
+    assert.equal(result.timedOut, true);
+    assert.equal(result.code, 0);
+    assert.equal(result.signal, null);
+    assert.equal(fallbackReason({ ...result, reportPresent: false }), "primary_timeout");
+  } finally {
+    realClearTimeout(watchdog);
+    controller.abort();
+    t.mock.timers.tick(2_000);
+    t.mock.timers.reset();
+    await execution;
+  }
 });
 
 test("PR guard rejects stale base/head, closed and unpermitted Draft", () => {
