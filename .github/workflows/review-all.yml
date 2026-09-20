@@ -374,15 +374,9 @@ jobs:
                 exit 1
               fi
               if is_trusted_automatic_bot "${TRIGGER_ACTOR}"; then
-                if [[ "${EVENT_NAME}" != "pull_request_target" ]]; then
-                  echo "::error::Доверенный бот допускается только в событии pull_request_target"
-                  exit 1
-                fi
-                if [[ "${event_head_repository}" != "${REPOSITORY}" ]]; then
-                  echo "::error::Доверенный бот допускается только для PR этого репозитория"
-                  exit 1
-                fi
-                echo "::notice::Инициатор ${TRIGGER_ACTOR} входит в список доверенных ботов; проверка write заменена проверками события и репозитория PR"
+                # Событие pull_request_target и совпадение репозитория head уже проверены выше
+                # общим путём автозапуска; для доверенного бота пропускается только проверка write.
+                echo "::notice::Инициатор ${TRIGGER_ACTOR} входит в список доверенных ботов; проверка write не выполняется"
               else
                 require_write_permission "${TRIGGER_ACTOR}"
               fi
