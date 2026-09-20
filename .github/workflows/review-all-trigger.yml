@@ -1,4 +1,4 @@
-name: Запуск организационного двойного ИИ-ревью
+name: Запуск организационного ИИ-ревью
 
 "on":
   issue_comment:
@@ -130,16 +130,16 @@ jobs:
           echo "accepted=true" >> "${GITHUB_OUTPUT}"
 
   manual-review:
-    name: Повторить двойное ревью вручную
+    name: Повторить ИИ-ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@907a587b719daf6aa4fad1064802336a7ca1a366
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1dfb06106c7263ce1bd2cc17815a283341f8d30f
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 907a587b719daf6aa4fad1064802336a7ca1a366
+      trusted_workflow_sha: 1dfb06106c7263ce1bd2cc17815a283341f8d30f
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
@@ -152,9 +152,12 @@ jobs:
       expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
       expected_codex_runner_name: sawabook-review-codex-179-198-117-215
       expected_claude_runner_name: sawabook-review-claude-179-198-117-215
+      codex_fallback_enabled: true
+      deepseek_enabled: true
       reuse_existing_reviews: false
-      review_gate_context: Canary нового ИИ-ревью
+      review_gate_context: ИИ-ревью
     secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
   finalize-manual-ack:
@@ -243,11 +246,13 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@ce8a887cbb97fd01afcc65384d34046431613dd9
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1dfb06106c7263ce1bd2cc17815a283341f8d30f
     with:
       trigger: automatic
       command: /review-all
       repository: ${{ github.repository }}
+      trusted_workflow_repository: Abrikosov-group/.github
+      trusted_workflow_sha: 1dfb06106c7263ce1bd2cc17815a283341f8d30f
       pr_number: ${{ github.event.pull_request.number }}
       expected_head_sha: ${{ github.event.pull_request.head.sha }}
       automatic_base_refs: main
@@ -259,6 +264,10 @@ jobs:
       expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
       expected_codex_runner_name: sawabook-review-codex-179-198-117-215
       expected_claude_runner_name: sawabook-review-claude-179-198-117-215
+      codex_fallback_enabled: true
+      deepseek_enabled: true
       reuse_existing_reviews: true
+      review_gate_context: ИИ-ревью
     secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

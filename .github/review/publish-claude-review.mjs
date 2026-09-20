@@ -14,6 +14,11 @@ const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const REVIEW_FINDINGS_PATTERN = /<!-- review-findings:P0=([0-9]+);P1=([0-9]+);P2=([0-9]+) -->/gu;
 const BINARY_COVERAGE_PATTERN = /<!-- review-binary-coverage:sha256=([0-9a-f]{64});files=([0-9]+) -->/gu;
 const REVIEW_MODELS = new Map([
+  ["deepseek-flash", {
+    displayName: "DeepSeek Flash",
+    marker: "deepseek-review-max-v1",
+    reviewer: "DeepSeek",
+  }],
   ["claude-sonnet-5", {
     displayName: "Claude Sonnet 5",
     marker: "claude-review",
@@ -40,6 +45,7 @@ const INVISIBLE_UNICODE_PATTERN = /\p{Cf}/gu;
 const UNSAFE_BINARY_PATH_PATTERN = /[\u0000-\u001f\u007f"\\`<>\p{Cf}]/u;
 const HIDDEN_CONTENT_PATTERN = /<!--|-->|\p{Cf}/iu;
 const SENSITIVE_DATA_PATTERNS = [
+  /\bsk-[A-Za-z0-9]{20,}\b/u,
   /(?:sk-ant-|github_pat_|gh[pousr]_)[A-Za-z0-9._-]{8,}/iu,
   /\b(?:sk-proj-|sk-svcacct-|xox[baprs]-)[A-Za-z0-9_-]{16,}\b/iu,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
@@ -383,7 +389,9 @@ export function buildReviewPayload(
         : [`<!-- review-binary-coverage:sha256=${binaryManifest.binaryManifestSha256};files=${binaryManifest.files.length} -->`]),
       `### Ревью ${model.reviewer}`,
       "",
-      `**Модель:** ${model.displayName}, усилие \`xhigh\`${reviewModel === "gpt-5.6-sol" ? ", обычная скорость" : ""}.`,
+      reviewModel === "deepseek-flash"
+        ? "**Модель:** DeepSeek Flash, запрошенное усилие `max`, thinking включён. API принял параметры; отдельное подтверждение внутреннего усилия не возвращается."
+        : `**Модель:** ${model.displayName}, усилие \`xhigh\`${reviewModel === "gpt-5.6-sol" ? ", обычная скорость" : ""}.`,
       "",
       summary,
       ...unanchoredSection,
