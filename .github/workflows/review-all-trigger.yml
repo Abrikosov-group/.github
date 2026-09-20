@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 3
     permissions:
       issues: write
-      pull-requests: read
+      pull-requests: write
     outputs:
       accepted: ${{ steps.ack.outputs.accepted }}
     env:
@@ -122,10 +122,12 @@ jobs:
             )] | first | .id // empty
           ' <<< "${reactions}")"
           if [[ -z "${existing_eyes}" ]]; then
-            gh api --method POST \
+            if ! gh api --method POST \
               -H 'Accept: application/vnd.github+json' \
               "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-              --raw-field content='eyes' > /dev/null
+              --raw-field content='eyes' > /dev/null; then
+              echo "::warning::Команда проверена; не удалось показать реакцию 👀"
+            fi
           fi
           echo "accepted=true" >> "${GITHUB_OUTPUT}"
 
@@ -168,6 +170,7 @@ jobs:
     timeout-minutes: 3
     permissions:
       issues: write
+      pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ github.repository }}
