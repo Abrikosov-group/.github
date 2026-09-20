@@ -40,6 +40,7 @@ test("provider request fixes Flash/max, rejects redirects and records only safe 
   const body = JSON.parse(request.body);
   assert.equal(body.model, "deepseek-flash"); assert.equal(body.reasoning_effort, "max");
   assert.deepEqual(body.thinking, { type: "enabled" });
+  assert.equal(body.max_tokens, 131072);
   assert.equal(body.tools, undefined);
   assert.equal(value.evidence.effortEcho, null);
   assert.equal(value.evidence.reasoningPresent, true);
@@ -67,6 +68,40 @@ for (const [name, fetchImpl, expected] of [
 test("aborted request and credential in input are explicit failures", async () => {
   await assert.rejects(completion({ key, messages: [{ content: key }] }), /credential_in_input/u);
   await assert.rejects(completion({ key, messages: [], signal: AbortSignal.abort(), fetchImpl: async () => { throw Error(); } }), /deadline_exceeded/u);
+});
+
+test("incomplete provider reply retains safe usage and reason without a retry or report", async (t) => {
+  const f = fixture(t); let calls = 0;
+  const result = await runReview({ ...f, complete: args => completion({ ...args,
+    fetchImpl: async () => {
+      calls++;
+      return Response.json(response({
+        choices: [{ finish_reason: "length", message: { role: "assistant", content: "partial private report", reasoning_content: "private reasoning" } }],
+        usage: { prompt_tokens: 1024, completion_tokens: 32768, completion_tokens_details: { reasoning_tokens: 32768 } },
+      }));
+    },
+  }) });
+  assert.equal(calls, 1);
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.failure, "response_incomplete");
+  assert.equal(result.calls.length, 1);
+  assert.equal(result.calls[0].finishReason, "length");
+  assert.equal(result.calls[0].completionTokens, 32768);
+  assert.equal(result.calls[0].reasoningTokens, 32768);
+  assert.equal(result.calls[0].httpStatus, 200);
+  assert.throws(() => readFileSync(join(f.output, "review.json")));
+  assert.doesNotMatch(readFileSync(join(f.output, "result.json"), "utf8"), /private|sk-/u);
+});
+
+test("unknown provider finish reason is not copied into failure evidence", async () => {
+  await assert.rejects(completion({ key, messages: [], fetchImpl: async () => Response.json(response({
+    choices: [{ finish_reason: "private-provider-text", message: {} }],
+  })) }), error => {
+    assert.equal(error.code, "response_incomplete");
+    assert.equal(error.evidence.finishReason, null);
+    assert.doesNotMatch(JSON.stringify(error.evidence), /private-provider-text/u);
+    return true;
+  });
 });
 
 test("snapshot denies traversal, unlisted paths, symlinks, mutated files and unknown tools", (t) => {

@@ -116,6 +116,7 @@ export async function runReview({ kind, input, output, manifestPath, task = "rev
     throw new ReviewFailure("tool_round_budget_exceeded");
   } catch (error) {
     result.state = "unavailable";
+    if (error instanceof ReviewFailure && error.evidence) result.calls.push(error.evidence);
     result.failure = error instanceof ReviewFailure ? error.code : "input_or_controller_error";
     return result;
   } finally {
