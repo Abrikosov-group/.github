@@ -19,7 +19,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
-const organizationWorkflowSha = "1dfb06106c7263ce1bd2cc17815a283341f8d30f";
+const organizationWorkflowSha = "86f26d64bb986b0c1982c88690ce0178e68c74ed";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -1379,7 +1379,7 @@ test("[4] посторонний автор, Draft и закрытый PR не �
     assert.match(acknowledgeJob, /author_association == 'COLLABORATOR'/u);
     assert.match(acknowledgeJob, /runs-on: ubuntu-24\.04/u);
     assert.match(acknowledgeJob, /timeout-minutes: 3/u);
-    assert.match(acknowledgeJob, /permissions:\n\s+issues: write\n\s+pull-requests: read/u);
+    assert.match(acknowledgeJob, /permissions:\n\s+issues: write\n\s+pull-requests: write/u);
     assert.match(acknowledgeJob, /accepted: \$\{\{ steps\.ack\.outputs\.accepted \}\}/u);
     assert.match(manualJob, /needs: acknowledge-manual/u);
     assert.match(
@@ -1417,6 +1417,20 @@ test("[4] посторонний автор, Draft и закрытый PR не �
   });
   assert.notEqual(unauthorized.status, 0);
   assert.doesNotMatch(unauthorized.outputs, /^accepted=true$/mu);
+});
+
+test("сбой реакции не отменяет проверенную ручную команду ревью", () => {
+  for (const source of [caller, organizationCaller]) {
+    const result = executeRunScript({
+      source,
+      stepName: "Проверить и подтвердить ручную команду",
+      ghMock: acknowledgementGhMock,
+      env: acknowledgementEnv({ MOCK_POST_FAILURE_CONTENT: "eyes" }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, /^accepted=true$/mu);
+    assert.match(result.stdout, /::warning::Команда проверена/u);
+  }
 });
 
 test("[11] два существующих маркера не запускают модели и дают итоговый статус", () => {
@@ -1906,8 +1920,7 @@ test("[15][18] финализатор имеет точный гейт и иде
     );
     assert.match(finalizer, /runs-on: ubuntu-24\.04/u);
     assert.match(finalizer, /timeout-minutes: 3/u);
-    assert.match(finalizer, /permissions:\n\s+issues: write/u);
-    assert.doesNotMatch(finalizer, /pull-requests:/u);
+    assert.match(finalizer, /permissions:\n\s+issues: write\n\s+pull-requests: write/u);
   }
 
   for (const reactions of [

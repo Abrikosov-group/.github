@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 3
     permissions:
       issues: write
-      pull-requests: read
+      pull-requests: write
     outputs:
       accepted: ${{ steps.ack.outputs.accepted }}
     env:
@@ -122,10 +122,12 @@ jobs:
             )] | first | .id // empty
           ' <<< "${reactions}")"
           if [[ -z "${existing_eyes}" ]]; then
-            gh api --method POST \
+            if ! gh api --method POST \
               -H 'Accept: application/vnd.github+json' \
               "repos/${REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-              --raw-field content='eyes' > /dev/null
+              --raw-field content='eyes' > /dev/null; then
+              echo "::warning::Команда проверена; не удалось показать реакцию 👀"
+            fi
           fi
           echo "accepted=true" >> "${GITHUB_OUTPUT}"
 
@@ -133,13 +135,13 @@ jobs:
     name: Повторить ИИ-ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1dfb06106c7263ce1bd2cc17815a283341f8d30f
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 1dfb06106c7263ce1bd2cc17815a283341f8d30f
+      trusted_workflow_sha: 86f26d64bb986b0c1982c88690ce0178e68c74ed
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
@@ -168,6 +170,7 @@ jobs:
     timeout-minutes: 3
     permissions:
       issues: write
+      pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       REPOSITORY: ${{ github.repository }}
@@ -246,13 +249,13 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@1dfb06106c7263ce1bd2cc17815a283341f8d30f
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
     with:
       trigger: automatic
       command: /review-all
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 1dfb06106c7263ce1bd2cc17815a283341f8d30f
+      trusted_workflow_sha: 86f26d64bb986b0c1982c88690ce0178e68c74ed
       pr_number: ${{ github.event.pull_request.number }}
       expected_head_sha: ${{ github.event.pull_request.head.sha }}
       automatic_base_refs: main
