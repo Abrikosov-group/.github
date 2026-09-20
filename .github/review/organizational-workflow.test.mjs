@@ -289,6 +289,7 @@ function contextEnv(overrides = {}) {
     EVENT_ACTION: "synchronize",
     AUTOMATIC_BASE_REFS: "main",
     MANUAL_BASE_REFS: "*",
+    TRUSTED_AUTOMATIC_BOT_LOGINS: "",
     MOCK_PERMISSION: "write",
     ...overrides,
   };
@@ -1295,6 +1296,138 @@ test("bot-login с фактическим write-доступом проходи�
     }),
   });
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("доверенный App-бот запускает автозревью без проверки write", () => {
+  const headSha = "e".repeat(40);
+  const trustedBots = "claude-abot[bot],deepseek-abot[bot]";
+  for (const actor of ["claude-abot[bot]", "deepseek-abot[bot]", "Claude-Abot[bot]"]) {
+    const result = executeRunScript({
+      stepName: "Проверить источник запуска",
+      ghMock: contextGhMock,
+      event: automaticEvent(headSha),
+      env: contextEnv({
+        EXPECTED_HEAD_SHA: headSha,
+        TRIGGER_ACTOR: actor,
+        TRUSTED_AUTOMATIC_BOT_LOGINS: trustedBots,
+        MOCK_PERMISSION: "none",
+        MOCK_PR_JSON: prFixture({ headSha }),
+      }),
+    });
+
+    assert.equal(result.status, 0, `${actor}: ${result.stderr}`);
+    assert.match(result.outputs, /^trigger=automatic$/mu);
+    assert.match(result.stdout, /входит в список доверенных ботов/u);
+    assert.doesNotMatch(result.ghLog, /\/collaborators\//u);
+  }
+});
+
+test("бот вне списка доверенных и пустой список требуют write как раньше", () => {
+  const headSha = "e".repeat(40);
+  for (const trustedBots of ["", "claude-abot[bot]"]) {
+    const result = executeRunScript({
+      stepName: "Проверить источник запуска",
+      ghMock: contextGhMock,
+      event: automaticEvent(headSha),
+      env: contextEnv({
+        EXPECTED_HEAD_SHA: headSha,
+        TRIGGER_ACTOR: "deepseek-abot[bot]",
+        TRUSTED_AUTOMATIC_BOT_LOGINS: trustedBots,
+        MOCK_PERMISSION: "none",
+        MOCK_PR_JSON: prFixture({ headSha }),
+      }),
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /не имеет доступа write/u);
+    assert.match(result.ghLog, /\/collaborators\/deepseek-abot\[bot\]\/permission/u);
+  }
+});
+
+test("доверенный бот не даёт ручной команде обойти проверку write", () => {
+  const comment = JSON.stringify({
+    issue_url: "https://api.github.com/repos/Abrikosov-group/project/issues/17",
+    body: "/review-all",
+    user: { login: "claude-abot[bot]" },
+    author_association: "MEMBER",
+  });
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({
+      COMMENT_ID: "91",
+      AUTHOR_ASSOCIATION: "MEMBER",
+      TRIGGER: "manual",
+      EVENT_NAME: "issue_comment",
+      EVENT_ACTION: "created",
+      TRIGGER_ACTOR: "claude-abot[bot]",
+      TRUSTED_AUTOMATIC_BOT_LOGINS: "claude-abot[bot],deepseek-abot[bot]",
+      MOCK_PERMISSION: "none",
+      MOCK_COMMENT_JSON: comment,
+      MOCK_PR_JSON: prFixture(),
+    }),
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /не имеет доступа write/u);
+  assert.match(result.ghLog, /\/collaborators\/claude-abot\[bot\]\/permission/u);
+});
+
+test("доверенный бот не открывает автозревью для fork", () => {
+  const headSha = "e".repeat(40);
+  const result = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent(headSha),
+    env: contextEnv({
+      EXPECTED_HEAD_SHA: headSha,
+      TRIGGER_ACTOR: "deepseek-abot[bot]",
+      TRUSTED_AUTOMATIC_BOT_LOGINS: "deepseek-abot[bot]",
+      MOCK_PERMISSION: "none",
+      MOCK_PR_JSON: prFixture({ headSha, headRepository: "contributor/project" }),
+    }),
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /только для ветки этого репозитория/u);
+  assert.doesNotMatch(result.ghLog, /\/collaborators\//u);
+});
+
+test("недопустимый формат списка доверенных ботов отклоняется", () => {
+  const headSha = "e".repeat(40);
+  for (const trustedBots of [
+    "claude-abot",
+    "claude-abot[bot],",
+    "claude-abot[bot], deepseek-abot[bot]",
+    "claude-abot[bot],deepseek",
+  ]) {
+    const result = executeRunScript({
+      stepName: "Проверить источник запуска",
+      ghMock: contextGhMock,
+      event: automaticEvent(headSha),
+      env: contextEnv({
+        EXPECTED_HEAD_SHA: headSha,
+        TRIGGER_ACTOR: "claude-abot[bot]",
+        TRUSTED_AUTOMATIC_BOT_LOGINS: trustedBots,
+        MOCK_PERMISSION: "none",
+        MOCK_PR_JSON: prFixture({ headSha }),
+      }),
+    });
+
+    assert.notEqual(result.status, 0, trustedBots);
+    assert.match(result.stdout, /Список доверенных ботов автоматического запуска имеет недопустимый формат/u);
+    assert.doesNotMatch(result.ghLog, /\/collaborators\//u);
+  }
+
+  assert.match(
+    workflow,
+    /trusted_automatic_bot_logins:\n\s+description: [^\n]+\n\s+required: false\n\s+default: ""\n\s+type: string/u,
+  );
+  assert.equal(
+    extractRunScript(workflow, "Проверить источник запуска")
+      .split('is_trusted_automatic_bot "${TRIGGER_ACTOR}"').length - 1,
+    1,
+  );
 });
 
 test("дорогие этапы ревью ограничены по времени", () => {
