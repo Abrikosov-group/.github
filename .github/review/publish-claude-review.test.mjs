@@ -257,7 +257,12 @@ test("принимает русский текст с ограниченными
   review.findings[0].title =
     "getYooKassaRenewal проверяет тело ответа до проверки response.ok";
 
-  assert.deepEqual(validateReviewJson(review), review);
+  assert.deepEqual(
+    validateReviewJson(review, {
+      diff: "+const value = getYooKassaRenewal; return response.ok;",
+    }),
+    review,
+  );
 });
 
 test("отклоняет длинные технические идентификаторы даже из точного diff", () => {
@@ -276,6 +281,13 @@ test("отклоняет длинные технические идентифи�
       /русский текст/u,
     );
   }
+});
+
+test("не снижает вес неподтверждённого технического идентификатора", () => {
+  const review = validReview();
+  review.findings[0].title = "Исправьте validation.accepts.invalid.value.and.publishes.english.text";
+
+  assert.throws(() => validateReviewJson(review), /русский текст/u);
 });
 
 test("отклоняет англоязычные заголовок и описание finding", () => {

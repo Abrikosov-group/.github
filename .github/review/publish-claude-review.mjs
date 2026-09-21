@@ -71,6 +71,11 @@ function containsSensitiveData(value) {
 }
 
 function weightedTechnicalIdentifier(value, matchedTechnicalIdentifiers) {
+  // Only an identifier present in the exact diff gets reduced weight. An
+  // unconfirmed model-generated token remains fully visible to both checks.
+  if (!matchedTechnicalIdentifiers.has(value)) {
+    return value;
+  }
   // A match in the diff may bound an overlong identifier, but never removes
   // its letters from either language-ratio calculation.
   const hasSeparator = /[._/:()[\]-]/u.test(value);
