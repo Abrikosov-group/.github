@@ -167,10 +167,16 @@ export async function runDiagnostic({
 }) {
   const root = resolve(profileRoot);
   const rootInfo = await inspectPath(root);
-  if (!rootInfo || rootInfo.isSymbolicLink() || !rootInfo.isDirectory()
+  if (!rootInfo) {
+    const profileResults = Object.fromEntries(PROFILE_IDS.map(id => [
+      id, safeFailure("unavailable", "profile_root_missing"),
+    ]));
+    return buildReport({ snapshotSha, runId, runAttempt, profileResults });
+  }
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()
     || !ownerMatches(rootInfo, expectedOwnerUid) || !modeIsPrivate(rootInfo.mode, 0o700)) {
     const profileResults = Object.fromEntries(PROFILE_IDS.map(id => [
-      id, safeFailure("misconfigured", rootInfo ? "profile_root_permissions" : "profile_root_missing"),
+      id, safeFailure("misconfigured", "profile_root_permissions"),
     ]));
     return buildReport({ snapshotSha, runId, runAttempt, profileResults });
   }
