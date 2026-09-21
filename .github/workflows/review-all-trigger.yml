@@ -141,13 +141,13 @@ jobs:
       issues: write
       pull-requests: write
       statuses: write
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@11747041a11b428a3ef01942ab72c3f1af66ebcf
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 86f26d64bb986b0c1982c88690ce0178e68c74ed
+      trusted_workflow_sha: 11747041a11b428a3ef01942ab72c3f1af66ebcf
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
@@ -260,13 +260,13 @@ jobs:
       issues: write
       pull-requests: write
       statuses: write
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@11747041a11b428a3ef01942ab72c3f1af66ebcf
     with:
       trigger: automatic
       command: /review-all
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 86f26d64bb986b0c1982c88690ce0178e68c74ed
+      trusted_workflow_sha: 11747041a11b428a3ef01942ab72c3f1af66ebcf
       pr_number: ${{ github.event.pull_request.number }}
       expected_head_sha: ${{ github.event.pull_request.head.sha }}
       automatic_base_refs: main
