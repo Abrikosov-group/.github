@@ -1037,42 +1037,6 @@ jobs:
           codex --version
           codex login status
 
-      - name: Одноразовая read-only диагностика профиля Codex
-        if: ${{ inputs.codex_account_diagnostic }}
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          report="${TMPDIR:-/tmp}/codex-doctor-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          trap 'rm -f "${report}"' EXIT
-          if ! command -v timeout >/dev/null 2>&1; then
-            echo "::warning::Диагностика профиля пропущена: в Runner нет timeout"
-            exit 0
-          fi
-          if ! timeout 20s codex doctor --json --summary >"${report}" 2>/dev/null; then
-            echo "::warning::Codex doctor не вернул redacted report за 20 секунд"
-            exit 0
-          fi
-          if ! jq -e . "${report}" >/dev/null 2>&1; then
-            echo "::warning::Codex doctor вернул невалидный JSON"
-            exit 0
-          fi
-          identifiers="$(jq -r '
-            [
-              .. | objects | to_entries[]?
-              | select(.key == "account_id" or .key == "chatgpt_account_id" or .key == "chatgpt_user_id")
-              | .value
-              | select(type == "string" and length > 0)
-            ] | unique | .[]
-          ' "${report}")"
-          if [[ -z "${identifiers}" ]]; then
-            echo "::warning::Codex doctor не вернул идентификатор аккаунта"
-            exit 0
-          fi
-          while IFS= read -r identifier; do
-          printf 'Codex account identifiers found: yes\n'
-          done <<< "${identifiers}"
-
       - name: Повторно проверить PR перед запуском Codex
         shell: bash
         env:
@@ -1092,6 +1056,37 @@ jobs:
             echo "::error::PR закрыт, переведён в Draft без разрешения либо его Base или Head изменился перед запуском Codex"
             exit 1
           fi
+
+      - name: Read-only диагностика профиля Codex по явному включению
+        if: ${{ inputs.codex_account_diagnostic }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +x
+          set -euo pipefail
+          for dependency in timeout jq; do
+            if ! command -v "${dependency}" >/dev/null 2>&1; then
+              echo "::warning::Диагностика профиля пропущена: нет ${dependency}"
+              exit 0
+            fi
+          done
+          if ! report="$(timeout 20s codex doctor --json --summary 2>/dev/null)"; then
+            echo "::warning::Codex doctor не завершил диагностику за 20 секунд"
+            exit 0
+          fi
+          if ! count="$(printf '%s' "${report}" | jq -ers '
+            if length != 1 then error("expected one JSON value") else
+              [.[0] | .. | objects | to_entries[]?
+                | select(.key == "account_id" or .key == "chatgpt_account_id" or .key == "chatgpt_user_id")
+                | .value | select(type == "string" and length > 0)]
+              | unique | length
+            end
+          ' 2>/dev/null)"; then
+            echo "::warning::Codex doctor вернул невалидный отчёт"
+            exit 0
+          fi
+          unset report
+          printf 'Codex account identifiers found: %s\n' "${count}"
 
       - name: Выполнить изолированное ревью Codex без инструментов
         id: analyze
