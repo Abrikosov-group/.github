@@ -1,0 +1,81 @@
+name: Диагностика профилей Codex
+
+"on":
+  workflow_dispatch:
+    inputs:
+      review_runner_group:
+        description: Группа доверенного runner
+        required: false
+        default: sawabook-review
+        type: string
+      codex_runner_label:
+        description: Label runner Codex
+        required: false
+        default: sawabook-review-codex
+        type: string
+      expected_runner_name:
+        description: Точное имя runner, которое должно быть подтверждено job
+        required: false
+        default: sawabook-review-codex-179-198-117-215
+        type: string
+      profile_root:
+        description: Фиксированный корень трёх профилей на runner
+        required: false
+        default: /var/lib/sawabook-review-codex/profiles
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: Проверить три профиля и шесть слотов
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.codex_runner_label }}
+    timeout-minutes: 5
+    env:
+      CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.profile_root }}
+      EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+
+    steps:
+      - name: Проверить доверенный runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
+      - name: Получить диагностический код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Выполнить metadata-only диагностику
+        id: diagnostic
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+          node .github/review/codex-account-diagnostic.mjs \
+            --profile-root "${CODEX_ACCOUNT_PROFILE_ROOT}" \
+            --report-path "${RUNNER_TEMP}/codex-account-diagnostic.json" \
+            > "${RUNNER_TEMP}/codex-account-diagnostic.stdout"
+          exit_code=$?
+          cat "${RUNNER_TEMP}/codex-account-diagnostic.stdout" >> "${GITHUB_STEP_SUMMARY}"
+          echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
+          exit "${exit_code}"
+
+      - name: Завершить с результатом диагностики
+        if: always()
+        shell: bash
+        env:
+          DIAGNOSTIC_EXIT_CODE: ${{ steps.diagnostic.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          if [[ "${DIAGNOSTIC_EXIT_CODE:-2}" != "0" ]]; then
+            echo "::error::Диагностика не подтвердила все профили: canary не разрешён"
+            exit 1
+          fi
