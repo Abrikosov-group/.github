@@ -62,6 +62,13 @@ test("reports a missing profile for both slots that use it", async () => {
   }
 });
 
+test("reports an absent profile root as unavailable", async () => {
+  const root = join(tmpdir(), `codex-account-diagnostic-missing-${Date.now()}-${process.pid}`);
+  const report = await runDiagnostic({ profileRoot: root, expectedOwnerUid: process.getuid() });
+  assert.ok(report.slots.every(slot => slot.status === "unavailable"));
+  assert.ok(report.slots.every(slot => slot.reason === "profile_root_missing"));
+});
+
 test("rejects symlinks and unsafe permissions without reading auth content", async () => {
   const root = await fixture();
   try {
