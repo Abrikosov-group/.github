@@ -645,6 +645,80 @@ test("Claude использует подписочный OAuth и не може�
   assert.doesNotMatch(workflow, /ANTHROPIC_AUTH_TOKEN:\s*\$\{\{/u);
 });
 
+test("список ботов для Claude снимает суффикс и пуст без настройки", () => {
+  const configured = executeRunScript({
+    stepName: "Подготовить список доверенных ботов для Claude",
+    ghMock: contextGhMock,
+    env: { TRUSTED_AUTOMATIC_BOT_LOGINS: "claude-abot[bot],deepseek-abot[bot]" },
+  });
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.match(configured.outputs, /^allowed_bots=claude-abot,deepseek-abot$/mu);
+
+  const withoutBots = executeRunScript({
+    stepName: "Подготовить список доверенных ботов для Claude",
+    ghMock: contextGhMock,
+    env: { TRUSTED_AUTOMATIC_BOT_LOGINS: "" },
+  });
+  assert.equal(withoutBots.status, 0, withoutBots.stderr);
+  assert.match(withoutBots.outputs, /^allowed_bots=$/mu);
+
+  const malformed = executeRunScript({
+    stepName: "Подготовить список доверенных ботов для Claude",
+    ghMock: contextGhMock,
+    env: { TRUSTED_AUTOMATIC_BOT_LOGINS: "claude-abot" },
+  });
+  assert.notEqual(malformed.status, 0);
+  assert.match(
+    malformed.stdout,
+    /Список доверенных ботов автоматического запуска имеет недопустимый формат/u,
+  );
+
+  const claudeJob = extractJob(workflow, "analyze-claude");
+  assert.equal(claudeJob.split("allowed_bots:").length - 1, 1);
+  assert.match(
+    claudeJob,
+    /allowed_bots: \$\{\{ steps\.claude-bots\.outputs\.allowed_bots \}\}/u,
+  );
+  assert.doesNotMatch(claudeJob, /allowed_bots:[^\n]*\*/u);
+});
+
+test("в выражениях workflow используются только поддерживаемые функции", () => {
+  const allowedFunctions = new Set([
+    "contains",
+    "startsWith",
+    "endsWith",
+    "format",
+    "join",
+    "toJSON",
+    "fromJSON",
+    "hashFiles",
+    "case",
+    "success",
+    "always",
+    "cancelled",
+    "failure",
+  ]);
+  const scanned = {
+    workflow,
+    caller,
+    organizationCaller,
+  };
+  const calls = new Set();
+  for (const [sourceName, source] of Object.entries(scanned)) {
+    for (const expression of source.matchAll(/\$\{\{([\s\S]*?)\}\}/gu)) {
+      for (const call of expression[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/gu)) {
+        calls.add(`${sourceName}:${call[1]}`);
+      }
+    }
+  }
+
+  assert.ok(calls.size > 0, "в workflow не найдено ни одного выражения с функцией");
+  assert.deepEqual(
+    [...calls].filter((entry) => !allowedFunctions.has(entry.split(":")[1])),
+    [],
+  );
+});
+
 test("обычное ревью Claude закреплено на Sonnet 5 с xhigh", () => {
   assert.match(workflow, /--model claude-sonnet-5/u);
   assert.match(workflow, /--effort xhigh/u);
