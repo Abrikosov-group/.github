@@ -1645,7 +1645,7 @@ test("[4] посторонний автор, Draft и закрытый PR не �
     assert.match(acknowledgeJob, /author_association == 'COLLABORATOR'/u);
     assert.match(acknowledgeJob, /runs-on: ubuntu-24\.04/u);
     assert.match(acknowledgeJob, /timeout-minutes: 3/u);
-    assert.match(acknowledgeJob, /permissions:\n\s+issues: write\n\s+pull-requests: write/u);
+    assert.match(acknowledgeJob, /permissions:\n\s+issues: write\n\s+pull-requests: read/u);
     assert.match(acknowledgeJob, /accepted: \$\{\{ steps\.ack\.outputs\.accepted \}\}/u);
     assert.match(manualJob, /needs: acknowledge-manual/u);
     assert.match(
@@ -2187,7 +2187,8 @@ test("[15][18] финализатор имеет точный гейт и иде
     );
     assert.match(finalizer, /runs-on: ubuntu-24\.04/u);
     assert.match(finalizer, /timeout-minutes: 3/u);
-    assert.match(finalizer, /permissions:\n\s+issues: write\n\s+pull-requests: write/u);
+    assert.match(finalizer, /permissions:\n\s+issues: write/u);
+    assert.doesNotMatch(finalizer, /pull-requests: write/u);
   }
 
   for (const reactions of [
