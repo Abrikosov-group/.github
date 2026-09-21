@@ -492,6 +492,7 @@ test("DeepSeek изолирован от подписочных ролей и н
   assert.match(analyze, /ref: \$\{\{ inputs.trusted_workflow_sha \}\}/u);
   assert.doesNotMatch(analyze, /ref:.*head_sha|npm |\.\/pr-head|run-codex-review/u);
   assert.match(publish, /if: needs.analyze-deepseek.outputs.state == 'completed'/u);
+  assert.match(publish, /REPOSITORY: \$\{\{ inputs\.repository \}\}/u);
   assert.doesNotMatch(publish, /DEEPSEEK_API_KEY/u);
   assert.doesNotMatch(extractJob(workflow, "finish-status").split("    env:")[0], /deepseek/u);
   assert.match(extractJob(workflow, "prepare-codex"), /if: steps.input.outputs.needed == 'true' \|\| inputs.deepseek_enabled/u);

@@ -1028,6 +1028,7 @@ jobs:
       - name: Проверить снимок и опубликовать отчёт DeepSeek
         env:
           GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
+          REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}

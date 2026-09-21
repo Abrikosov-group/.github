@@ -290,6 +290,17 @@ test("не снижает вес неподтверждённого технич
   assert.throws(() => validateReviewJson(review), /русский текст/u);
 });
 
+test("raw-проверка учитывает полную длину подтверждённых идентификаторов", () => {
+  const identifiers = ["abcDefghij", "klmNopqrst", "uvwXyzabcd", "efgHijklmno", "pqrStuvwxy"];
+  const review = validReview();
+  review.findings[0].title = `Проверка корректна и безопасна ${identifiers.join(" ")}`;
+
+  assert.throws(
+    () => validateReviewJson(review, { diff: identifiers.map((id) => `+const value = ${id};`).join("\n") }),
+    /русский текст/u,
+  );
+});
+
 test("отклоняет англоязычные заголовок и описание finding", () => {
   const englishTitle = validReview();
   englishTitle.findings[0].title = "Validation accepts an invalid value";

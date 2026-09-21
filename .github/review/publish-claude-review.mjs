@@ -213,12 +213,10 @@ function assertSafeText(
         TECHNICAL_IDENTIFIER_PATTERN,
         (identifier) => weightedTechnicalIdentifier(identifier, matchedTechnicalIdentifiers),
       );
-    const rawProse = unweightedProse.replace(
-      TECHNICAL_IDENTIFIER_PATTERN,
-      (identifier) => matchedTechnicalIdentifiers.has(identifier)
-        ? weightedTechnicalIdentifier(identifier, matchedTechnicalIdentifiers)
-        : identifier,
-    );
+    // The raw ratio intentionally keeps the full spelling of every
+    // identifier. It prevents a finding from hiding too much non-Russian text
+    // behind several short identifiers that happen to occur in the diff.
+    const rawProse = unweightedProse;
     const letters = prose.match(/\p{L}/gu) ?? [];
     const russianLetters = prose.match(/[А-ЯЁа-яё]/gu) ?? [];
     const rawLetters = rawProse.match(/\p{L}/gu) ?? [];
