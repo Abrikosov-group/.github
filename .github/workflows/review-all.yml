@@ -1460,6 +1460,22 @@ jobs:
             exit 1
           fi
 
+      - name: Подготовить список доверенных ботов для Claude
+        if: steps.existing.outputs.needed == 'true'
+        id: claude-bots
+        shell: bash
+        env:
+          TRUSTED_AUTOMATIC_BOT_LOGINS: ${{ inputs.trusted_automatic_bot_logins }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${TRUSTED_AUTOMATIC_BOT_LOGINS}" &&
+                ! "${TRUSTED_AUTOMATIC_BOT_LOGINS}" =~ ^[A-Za-z0-9-]+\[bot\](,[A-Za-z0-9-]+\[bot\])*$ ]]; then
+            echo "::error::Список доверенных ботов автоматического запуска имеет недопустимый формат"
+            exit 1
+          fi
+          echo "allowed_bots=$(sed 's/\[bot\]//g' <<< "${TRUSTED_AUTOMATIC_BOT_LOGINS}")" >> "${GITHUB_OUTPUT}"
+
       - name: Выполнить изолированное review-only ревью
         if: steps.existing.outputs.needed == 'true'
         id: claude
@@ -1471,6 +1487,7 @@ jobs:
           show_full_output: false
           track_progress: false
           classify_inline_comments: false
+          allowed_bots: ${{ steps.claude-bots.outputs.allowed_bots }}
           prompt: |
             Репозиторий: ${{ inputs.repository }}
             PR: #${{ inputs.pr_number }}
