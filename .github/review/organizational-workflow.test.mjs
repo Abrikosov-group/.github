@@ -394,6 +394,21 @@ test("организационный workflow запускает Codex и Claude
   assert.match(workflow, /\/review-claude/u);
 });
 
+test("автособытие безопасно обрабатывает jq false и не выдаёт ложное уведомление при переиспользовании", () => {
+  assert.match(
+    workflow,
+    /event_draft="\$\(jq -er '\.pull_request \| \(\.draft == false or \(\.draft == true and env\.REVIEW_DRAFTS == "true"\)\) \| tostring' "\$\{GITHUB_EVENT_PATH\}"\)"/u,
+  );
+  assert.match(
+    workflow,
+    /echo "Актуальное ревью \$\{review_model_name\} для точного binary manifest уже существует"\n\s+else\n\s+echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"/u,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /echo "Актуальное ревью \$\{review_model_name\} для точного binary manifest уже существует"\n\s+fi\n\s+echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"/u,
+  );
+});
+
 test("Codex выбирает Spark или Sol xhigh на настраиваемом защищённом Runner", () => {
   const codexJob = extractJob(workflow, "analyze-codex");
   assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);

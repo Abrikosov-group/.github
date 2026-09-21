@@ -348,7 +348,7 @@ jobs:
               event_base_ref="$(jq -er '.pull_request.base.ref' "${GITHUB_EVENT_PATH}")"
               event_head_sha="$(jq -er '.pull_request.head.sha' "${GITHUB_EVENT_PATH}")"
               event_head_repository="$(jq -er '.pull_request.head.repo.full_name' "${GITHUB_EVENT_PATH}")"
-              event_draft="$(jq -er '.pull_request | (.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true"))' "${GITHUB_EVENT_PATH}")"
+              event_draft="$(jq -er '.pull_request | (.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")) | tostring' "${GITHUB_EVENT_PATH}")"
               if [[ "${event_pr_number}" != "${PR_NUMBER}" ||
                     "${event_head_sha}" != "${EXPECTED_HEAD_SHA}" ||
                     "${event_head_repository}" != "${REPOSITORY}" ||
@@ -884,8 +884,9 @@ jobs:
                 codex_needed=false
                 echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
                 echo "Актуальное ревью ${review_model_name} для точного binary manifest уже существует"
+              else
+                echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
               fi
-              echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
             fi
           fi
           echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
