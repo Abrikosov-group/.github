@@ -135,6 +135,12 @@ jobs:
     name: Повторить ИИ-ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+      statuses: write
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
     with:
       trigger: manual
@@ -248,6 +254,12 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+      statuses: write
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
     with:
       trigger: automatic

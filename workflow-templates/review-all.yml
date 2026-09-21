@@ -133,6 +133,12 @@ jobs:
     name: Повторить двойное ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+      statuses: write
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@ce8a887cbb97fd01afcc65384d34046431613dd9
     with:
@@ -231,6 +237,12 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+      statuses: write
     # Обновляйте SHA только отдельным PR после проверки центрального workflow.
     uses: Abrikosov-group/.github/.github/workflows/review-all.yml@ce8a887cbb97fd01afcc65384d34046431613dd9
     with:

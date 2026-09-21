@@ -665,6 +665,16 @@ test("центральный caller разрешает status-права reusabl
     const job = extractJob(workflow, jobId);
     assert.match(job, /permissions:[\s\S]*?statuses: write/u);
   }
+
+  for (const source of [organizationCaller, caller]) {
+    for (const jobId of ["manual-review", "automatic-review"]) {
+      const job = extractJob(source, jobId);
+      assert.match(
+        job,
+        /permissions:\n\s+actions: read\n\s+contents: read\n\s+issues: write\n\s+pull-requests: write\n\s+statuses: write/u,
+      );
+    }
+  }
 });
 
 test("Codex не получает shell, плагины, GitHub-токен или checkout PR", () => {
