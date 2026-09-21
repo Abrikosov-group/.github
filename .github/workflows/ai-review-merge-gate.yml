@@ -1,0 +1,55 @@
+name: Merge gate ИИ-ревью
+
+"on":
+  pull_request_target:
+    branches: [main]
+    types: [opened, ready_for_review, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  hold-merge-until-ai-review:
+    name: Удержать merge до ИИ-ревью
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        github.event.action != 'edited' ||
+        (
+          github.event.changes.base.ref.from != null &&
+          github.event.changes.base.ref.from != github.event.pull_request.base.ref
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+
+    steps:
+      - name: Поставить обязательный статус ожидания ИИ-ревью
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_GATE_CONTEXT: ИИ-ревью
+        run: |
+          set -euo pipefail
+
+          current_status="$(gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}/status")"
+          latest_gate_state="$(jq -r --arg context "${REVIEW_GATE_CONTEXT}" '
+            [.statuses[]? | select(.context == $context)] | first | .state // ""
+          ' <<< "${current_status}")"
+          if [[ "${latest_gate_state}" == "success" ]]; then
+            echo "ИИ-ревью уже успешно завершено для ${HEAD_SHA}; pending не переустанавливается."
+            exit 0
+          fi
+
+          gh api --method POST \
+            "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            --raw-field state='pending' \
+            --raw-field context="${REVIEW_GATE_CONTEXT}" \
+            --raw-field description='Ожидается завершение организационного ИИ-ревью' \
+            --raw-field target_url="${RUN_URL}" > /dev/null
