@@ -292,7 +292,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const snapshot = { repository: process.env.REPOSITORY, pr: process.env.PR_NUMBER,
     base: process.env.BASE_SHA, head: process.env.HEAD_SHA,
     runId: process.env.GITHUB_RUN_ID, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT) };
-  runRound({ root: process.env.REVIEW_ROOT, snapshot, fallbackEnabled: process.env.CODEX_FALLBACK_ENABLED === "true",
+  runRound({ root: process.env.REVIEW_ROOT, snapshot,
+    primaryModel: process.env.REVIEW_MODEL || PRIMARY_MODEL,
+    fallbackEnabled: process.env.CODEX_FALLBACK_ENABLED === "true",
     signal: controller.signal,
     currentPR: async () => {
       const raw = execFileSync("gh", ["api", `repos/${snapshot.repository}/pulls/${snapshot.pr}`],

@@ -5,6 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { assertCurrentPR, attemptDiagnostic, codexInvocation, executeCodex, fallbackReason, runRound,
   PRIMARY_MODEL, FALLBACK_MODEL } from "./run-codex-review.mjs";
 
@@ -442,7 +443,7 @@ console.log(JSON.stringify({type:'error', status:400,error:{type:'invalid_reques
 `);
   await Promise.all([chmod(join(bin, "gh"), 0o700), chmod(join(bin, "codex"), 0o700)]);
   const output = join(h.root, "github-output");
-  await promisify(execFile)(process.execPath, [new URL("./run-codex-review.mjs", import.meta.url).pathname], {
+  await promisify(execFile)(process.execPath, [fileURLToPath(new URL("./run-codex-review.mjs", import.meta.url))], {
     timeout: 10_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REVIEW_ROOT: h.root,
       RUNNER_TEMP: h.root, REPOSITORY: snapshot.repository, PR_NUMBER: String(snapshot.pr),
       BASE_SHA: snapshot.base, HEAD_SHA: snapshot.head, GITHUB_RUN_ID: snapshot.runId,

@@ -11,6 +11,7 @@ import {
   buildStaleReviewBody,
   collectDiffAnchors,
   collectDiffLines,
+  collectMatchedTechnicalIdentifiers,
   main,
   partitionFindingAnchors,
   reviewNeeded,
@@ -251,6 +252,32 @@ test("принимает обычные OAuth-идентификаторы", () 
   assert.deepEqual(validateReviewJson(review), review);
 });
 
+test("принимает русский текст с ограниченными техническими идентификаторами", () => {
+  const review = validReview();
+  review.findings[0].title =
+    "getYooKassaRenewal проверяет тело ответа до проверки response.ok";
+
+  assert.deepEqual(validateReviewJson(review), review);
+});
+
+test("принимает длинные технические идентификаторы только из точного diff", () => {
+  const identifiers = [
+    "getYooKassaRenewalBeforeConfirmingPayment",
+    "get_yookassa_renewal_before_confirming_payment",
+    "billing.subscription.renewal.response",
+  ];
+
+  for (const identifier of identifiers) {
+    const review = validReview();
+    review.findings[0].title = `Исправьте ${identifier}`;
+
+    assert.deepEqual(
+      validateReviewJson(review, { diff: `+const result = ${identifier};` }),
+      review,
+    );
+  }
+});
+
 test("отклоняет англоязычные заголовок и описание finding", () => {
   const englishTitle = validReview();
   englishTitle.findings[0].title = "Validation accepts an invalid value";
@@ -263,6 +290,40 @@ test("отклоняет англоязычные заголовок и опис
   const disguisedEnglish = validReview();
   disguisedEnglish.findings[0].body = "Ошибка: validation accepts an invalid request and returns the wrong result.";
   assert.throws(() => validateReviewJson(disguisedEnglish), /русский текст/u);
+});
+
+test("не обнуляет вес длинного идентификатора, повторённого из diff", () => {
+  const identifier = "getYooKassaRenewalBeforeConfirmingPayment";
+  const review = validReview();
+  review.findings[0].title = `Баг ${identifier}`;
+
+  assert.throws(
+    () => validateReviewJson(review, { diff: `+const result = ${identifier};` }),
+    /русский текст/u,
+  );
+});
+
+test("сопоставляет с diff только идентификаторы из результата модели", () => {
+  const candidates = new Set(["getYooKassaRenewalBeforeConfirmingPayment"]);
+  const diff = [
+    `+const first = getYooKassaRenewalBeforeConfirmingPayment;`,
+    "+const second = unrelatedIdentifier;",
+  ].join("\n");
+
+  assert.deepEqual(
+    [...collectMatchedTechnicalIdentifiers(diff, candidates)],
+    ["getYooKassaRenewalBeforeConfirmingPayment"],
+  );
+});
+
+test("обрабатывает большой повторяющийся diff без полного массива совпадений", () => {
+  const candidate = "getYooKassaRenewalBeforeConfirmingPayment";
+  const diff = `${"+const result = unrelatedIdentifier;\n".repeat(100_000)}+const result = ${candidate};`;
+
+  assert.deepEqual(
+    [...collectMatchedTechnicalIdentifiers(diff, new Set([candidate]))],
+    [candidate],
+  );
 });
 
 test("извлекает строки обеих сторон из zero-context diff", () => {

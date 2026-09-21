@@ -555,7 +555,7 @@ jobs:
 
           if [[ "${MODE}" == "all" ]]; then
             heading='### 🚀 Двойное ИИ-ревью запущено'
-            reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+            reviewers="- ⏳ Codex (модель выбирается по размеру, \`xhigh\`) — запущен
           - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
           else
@@ -621,7 +621,7 @@ jobs:
           fi
 
   prepare-codex:
-    name: Подготовить безопасный вход для Codex Spark
+    name: Подготовить безопасный вход и выбрать модель Codex
     needs: [context, start-status]
     if: needs.context.outputs.mode == 'all'
     runs-on:
@@ -756,59 +756,6 @@ jobs:
             echo 'BINARY_SUMMARY_EOF'
           } >> "${GITHUB_OUTPUT}"
 
-          codex_needed=true
-          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
-            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
-            fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
-            coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
-            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
-            existing="$(jq -c \
-              --arg marker "${marker}" \
-              --arg fallback_marker "${fallback_marker}" \
-              --arg fallback_enabled "${CODEX_FALLBACK_ENABLED:-false}" \
-              --arg coverage_marker "${coverage_marker}" \
-              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
-              '[.[][]? | select(
-                .user.login == $login and
-                (((.body // "") | contains($marker)) or
-                  ($fallback_enabled == "true" and
-                   ((.body // "") | contains($fallback_marker)) and
-                   ((.body // "") | contains("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")))) and
-                ((.body // "") | contains($coverage_marker))
-              )] | sort_by(.id) | last // null' \
-              <<< "${reviews}")"
-            if [[ "${existing}" != "null" ]]; then
-              if blocking_findings="$(jq -er '
-                [
-                  (.body // "") |
-                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
-                ] as $matches |
-                select(($matches | length) == 1) |
-                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
-                [$counts.p0, $counts.p1, $counts.p2] |
-                map(tonumber) |
-                select(all(.[]; . <= 9007199254740991)) |
-                add |
-                select(. <= 9007199254740991)
-              ' <<< "${existing}")"; then
-                review_model='gpt-5.3-codex-spark'
-                if jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
-                  review_model='gpt-5.6-sol'
-                fi
-                echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
-                codex_needed=false
-                echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
-                echo "Актуальное ревью Codex (${review_model}) для точного binary manifest уже существует"
-                if [[ "${DEEPSEEK_ENABLED:-false}" != "true" ]]; then
-                  echo "needed=false" >> "${GITHUB_OUTPUT}"
-                  exit 0
-                fi
-              fi
-              echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
-            fi
-          fi
-          echo "needed=${codex_needed}" >> "${GITHUB_OUTPUT}"
-
           jq -n '{
             type: "object",
             properties: {
@@ -871,10 +818,6 @@ jobs:
           : > "${input_dir}/empty"
           prompt_overhead="$(write_prompt "${input_dir}/empty" "${input_dir}/empty" | wc -c | tr -d '[:space:]')"
           projected_prompt_size=$((prompt_overhead + manifest_size + diff_size))
-          if (( projected_prompt_size > 524288 )); then
-            echo "::error::Вход Codex после подготовки — ${projected_prompt_size} байт; предел 512 KiB. Разделите текстовые изменения PR"
-            exit 1
-          fi
           write_prompt \
             "${input_dir}/binary-manifest.json" \
             "${input_dir}/pull-request.diff" \
@@ -886,13 +829,76 @@ jobs:
             echo "::error::Размер prompt изменился после preflight: projected=${projected_prompt_size}, actual=${prompt_size}, overhead=${prompt_overhead}, manifest=${manifest_size}, diff=${diff_size}"
             exit 1
           fi
+          schema_size="$(wc -c < "${input_dir}/review.schema.json" | tr -d '[:space:]')"
+          visible_input_size=$((prompt_size + schema_size))
+          if (( visible_input_size <= 229376 )); then
+            review_model="gpt-5.3-codex-spark"
+            review_model_name="GPT-5.3-Codex-Spark"
+          elif (( visible_input_size <= 672883 )); then
+            review_model="gpt-5.6-sol"
+            review_model_name="GPT-5.6 Sol"
+          else
+            echo "::error::Видимый вход Codex — ${visible_input_size} байт и превышает проверенный предел 672883 байт. Разделите текстовые изменения PR"
+            exit 1
+          fi
+          codex_needed=true
+          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
+            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:${review_model} -->"
+            fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
+            coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
+            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
+            existing="$(jq -c \
+              --arg marker "${marker}" \
+              --arg fallback_marker "${fallback_marker}" \
+              --arg fallback_enabled "${CODEX_FALLBACK_ENABLED:-false}" \
+              --arg coverage_marker "${coverage_marker}" \
+              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
+              '[.[][]? | select(
+                .user.login == $login and
+                (((.body // "") | contains($marker)) or
+                  ($fallback_enabled == "true" and
+                   ((.body // "") | contains($fallback_marker)) and
+                   ((.body // "") | contains("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")))) and
+                ((.body // "") | contains($coverage_marker))
+              )] | sort_by(.id) | last // null' \
+              <<< "${reviews}")"
+            if [[ "${existing}" != "null" ]]; then
+              if blocking_findings="$(jq -er '
+                [
+                  (.body // "") |
+                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
+                ] as $matches |
+                select(($matches | length) == 1) |
+                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
+                [$counts.p0, $counts.p1, $counts.p2] |
+                map(tonumber) |
+                select(all(.[]; . <= 9007199254740991)) |
+                add |
+                select(. <= 9007199254740991)
+              ' <<< "${existing}")"; then
+                if [[ "${review_model}" != "gpt-5.6-sol" ]] &&
+                   jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
+                  review_model='gpt-5.6-sol'
+                  review_model_name='GPT-5.6 Sol'
+                fi
+                codex_needed=false
+                echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
+                echo "Актуальное ревью ${review_model_name} для точного binary manifest уже существует"
+              fi
+              echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
+            fi
+          fi
+          echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
+          echo "needed=${codex_needed}" >> "${GITHUB_OUTPUT}"
           {
-            echo "### Вход Codex Spark"
+            echo "### Вход Codex"
             echo
+            echo "- Модель: ${review_model_name}"
             echo "- Текстовый diff: ${diff_size} байт"
             echo "- Manifest бинарных файлов: ${manifest_size} байт"
             echo "- Бинарных файлов: ${binary_files}"
             echo "- Итоговый prompt: ${prompt_size} байт"
+            echo "- Видимый вход со схемой: ${visible_input_size} байт"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
@@ -1031,7 +1037,7 @@ jobs:
         run: node _review_infra/.github/review/publish-deepseek-review.mjs
 
   analyze-codex:
-    name: Проанализировать PR с Codex и разрешённым резервом
+    name: Проанализировать PR с выбранной моделью Codex
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
@@ -1101,6 +1107,7 @@ jobs:
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+          REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
         run: |
           set -euo pipefail
           node "${REVIEW_ROOT}/input/run-codex-review.mjs"
@@ -1197,7 +1204,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model }}
+          REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
           REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/codex/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/codex/pull-request.diff
           BINARY_MANIFEST_PATH: ${{ github.workspace }}/.review-input/codex/binary-manifest.json
@@ -1851,7 +1858,10 @@ jobs:
             exit 1
           fi
 
-          codex_model_label='GPT-5.3-Codex-Spark'
+          codex_model_label='Codex'
+          if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.3-codex-spark" ]]; then
+            codex_model_label='GPT-5.3-Codex-Spark'
+          fi
           if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.6-sol" ]]; then
             codex_model_label='GPT-5.6 Sol'
           fi
@@ -1860,7 +1870,7 @@ jobs:
             codex_ok=true
             codex_line=""
           elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
+            codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — актуальное ревью уже существует"

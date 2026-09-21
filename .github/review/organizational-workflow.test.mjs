@@ -264,7 +264,11 @@ case "\${script}" in
       esac
     done
     mkdir -p "$(dirname "\${diff_path}")" "$(dirname "\${manifest_path}")"
-    printf '%s\n' 'diff --git a/file.txt b/file.txt' > "\${diff_path}"
+    if [[ -n "\${MOCK_DIFF_SIZE:-}" ]]; then
+      head -c "\${MOCK_DIFF_SIZE}" /dev/zero | tr '\\000' x > "\${diff_path}"
+    else
+      printf '%s\n' 'diff --git a/file.txt b/file.txt' > "\${diff_path}"
+    fi
     printf '{"schemaVersion":2,"baseSha":"%s","mergeBaseSha":"%s","headSha":"%s","binaryManifestSha256":"%s","files":[]}\n' \
       "\${BASE_SHA}" "\${BASE_SHA}" "\${HEAD_SHA}" '${emptyManifestHash}' > "\${manifest_path}"
     printf '{"diffBytes":%s,"manifestBytes":%s,"binaryFiles":0,"binaryManifestSha256":"%s"}\n' \
@@ -379,8 +383,9 @@ function statusEnv(overrides = {}) {
   };
 }
 
-test("организационный workflow запускает только Codex и Claude", () => {
+test("организационный workflow запускает Codex и Claude", () => {
   assert.match(codexController, /PRIMARY_MODEL = "gpt-5\.3-codex-spark"/u);
+  assert.match(workflow, /gpt-5\.6-sol/u);
   assert.match(workflow, /claude-sonnet-5/u);
   assert.doesNotMatch(workflow, /@codex review/u);
   assert.doesNotMatch(workflow, /\/gemini\s+review/iu);
@@ -389,15 +394,17 @@ test("организационный workflow запускает только Co
   assert.match(workflow, /\/review-claude/u);
 });
 
-test("Codex использует подписочный Spark xhigh на настраиваемом защищённом Runner", () => {
+test("Codex выбирает Spark или Sol xhigh на настраиваемом защищённом Runner", () => {
   const codexJob = extractJob(workflow, "analyze-codex");
   assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);
   assert.match(workflow, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_codex_runner_name \}\}/u);
   assert.match(workflow, /codex login status/u);
-  assert.match(codexController, /PRIMARY_MODEL = "gpt-5\.3-codex-spark"/u);
+  assert.match(codexController, /primaryModel: process\.env\.REVIEW_MODEL \|\| PRIMARY_MODEL/u);
   assert.match(codexController, /model_reasoning_effort="xhigh"/u);
   assert.match(codexController, /web_search="disabled"/u);
-  assert.match(workflow, /REVIEW_MODEL: \$\{\{ needs\.analyze-codex\.outputs\.review_model \}\}/u);
+  assert.match(workflow, /REVIEW_MODEL: \$\{\{ needs\.prepare-codex\.outputs\.review_model \}\}/u);
+  assert.match(workflow, /visible_input_size <= 229376/u);
+  assert.match(workflow, /visible_input_size <= 672883/u);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
   assert.match(
     workflow,
@@ -515,12 +522,49 @@ test("безопасный вход Codex строится от доказанн
   assert.match(workflow, /BEGIN UNTRUSTED BINARY MANIFEST/u);
   assert.match(workflow, /binary-manifest\.json/u);
   assert.match(workflow, /prompt_size="\$\(wc -c < "\$\{input_dir\}\/prompt\.txt" \| tr -d '\[:space:\]'\)"/u);
-  assert.match(workflow, /if \(\( projected_prompt_size > 524288 \)\)/u);
-  assert.ok(
-    workflow.indexOf("projected_prompt_size > 524288") <
-      workflow.indexOf('write_prompt \\\n            "${input_dir}/binary-manifest.json"'),
-  );
+  assert.match(workflow, /visible_input_size <= 229376/u);
+  assert.match(workflow, /visible_input_size <= 672883/u);
   assert.doesNotMatch(workflow, /application\/vnd\.github\.diff/u);
+});
+
+test("модель Codex выбирается по полному видимому входу", () => {
+  const commonEnv = {
+    REPOSITORY: "Abrikosov-group/project",
+    PR_NUMBER: "17",
+    BASE_SHA: "a".repeat(40),
+    HEAD_SHA: "b".repeat(40),
+    TRIGGER: "automatic",
+    REVIEW_PUBLISHER_LOGIN: "github-actions[bot]",
+    REUSE_EXISTING_REVIEWS: "true",
+    MOCK_PR_JSON: prFixture(),
+    MOCK_REVIEWS_JSON: "[[]]",
+  };
+  const cases = [
+    [100_000, "gpt-5.3-codex-spark"],
+    [383_624, "gpt-5.6-sol"],
+  ];
+
+  for (const [diffSize, expectedModel] of cases) {
+    const result = executeRunScript({
+      stepName: "Проверить дубликат и подготовить вход модели",
+      ghMock: markerGhMock,
+      commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
+      env: { ...commonEnv, MOCK_DIFF_SIZE: String(diffSize) },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, new RegExp(`^review_model=${expectedModel}$`, "mu"));
+    assert.match(result.outputs, /^needed=true$/mu);
+  }
+
+  const tooLarge = executeRunScript({
+    stepName: "Проверить дубликат и подготовить вход модели",
+    ghMock: markerGhMock,
+    commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
+    env: { ...commonEnv, MOCK_DIFF_SIZE: "675000" },
+  });
+  assert.notEqual(tooLarge.status, 0);
+  assert.match(tooLarge.stdout, /превышает проверенный предел 672883/u);
+  assert.doesNotMatch(tooLarge.outputs, /^review_model=/mu);
 });
 
 test("исполняемый организационный код закреплён полными SHA", () => {
@@ -631,7 +675,7 @@ test("Codex публикуется только после схемы и дов�
   assert.match(codexController, /"--output-schema", schemaPath/u);
   assert.match(codexController, /"--output-last-message", resultPath/u);
   assert.match(workflow, /REVIEW_JSON_FILE:/u);
-  assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:gpt-5\.3-codex-spark/u);
+  assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:\$\{review_model\}/u);
   assert.match(workflow, /node _review_infra\/\.github\/review\/publish-claude-review\.mjs/u);
 });
 
@@ -1713,12 +1757,13 @@ test("[11] два существующих маркера не запускаю�
       CLAUDE_PUBLISH_RESULT: "skipped",
       CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
       CLAUDE_REUSED_BLOCKING_FINDINGS: "0",
+      CODEX_REVIEW_MODEL: "gpt-5.3-codex-spark",
       REVIEW_GATE_CONTEXT: "",
     },
   });
   assert.equal(finish.status, 0, finish.stderr);
   assert.match(finish.ghLog, /Двойное ИИ-ревью завершено/u);
-  assert.match(finish.ghLog, /GPT-5\.3-Codex-Spark.*актуальное ревью уже существует/u);
+  assert.match(finish.ghLog, /Codex.*актуальное ревью уже существует/u);
   assert.match(finish.ghLog, /Claude Sonnet 5.*актуальное ревью уже существует/u);
 });
 
@@ -2212,7 +2257,7 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(startStatus, /Поставить 🚀 и опубликовать статус запуска/u);
   assert.match(startStatus, /--raw-field content='rocket'/u);
   assert.match(startStatus, /<!-- organizational-review-status -->/u);
-  assert.match(startStatus, /GPT-5\.3-Codex-Spark \(\\`xhigh\\`\) — запущен/u);
+  assert.match(startStatus, /Codex \(модель выбирается по размеру, \\`xhigh\\`\) — запущен/u);
   assert.match(startStatus, /Claude Sonnet 5 \(\\`xhigh\\`\) — запущен/u);
   assert.match(startStatus, /echo "comment_id=\$\{comment_id\}"/u);
   assert.match(finishStatus, /always\(\)/u);
@@ -2237,7 +2282,7 @@ test("пользовательская документация описывае
   assert.match(contributing, /реакц/u);
   assert.match(contributing, /статусн/u);
   assert.doesNotMatch(contributing, /\/review-claude/u);
-  assert.match(pullRequestTemplate, /GPT-5\.3-Codex-Spark и Claude Sonnet 5/u);
+  assert.match(pullRequestTemplate, /Codex \(Spark или Sol по размеру входа\) и Claude Sonnet 5/u);
   assert.doesNotMatch(pullRequestTemplate, /Codex, Claude и Gemini/u);
 });
 
@@ -2336,6 +2381,7 @@ test("Sol повторно используется только при opt-in �
       commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
       env: { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", BASE_SHA: baseSha, HEAD_SHA: headSha,
         TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: "github-actions[bot]", REUSE_EXISTING_REVIEWS: "true",
+        MOCK_DIFF_SIZE: "100",
         CODEX_FALLBACK_ENABLED: enabled, MOCK_PR_JSON: prFixture({ baseSha, headSha }),
         MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 110, user: { login: "github-actions[bot]" },
           body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.6-sol -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}\n${profile}` }]]) },
