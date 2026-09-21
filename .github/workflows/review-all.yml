@@ -1033,6 +1033,7 @@ jobs:
           codex login status
 
       - name: Одноразовая read-only диагностика профиля Codex
+        if: ${{ inputs.command == '/codex-account-diagnostic' }}
         shell: bash
         continue-on-error: true
         run: |
@@ -1064,7 +1065,7 @@ jobs:
             exit 0
           fi
           while IFS= read -r identifier; do
-            printf 'Codex account identifier: %s\n' "${identifier}"
+          printf 'Codex account identifiers found: yes\n'
           done <<< "${identifiers}"
 
       - name: Повторно проверить PR перед запуском Codex
