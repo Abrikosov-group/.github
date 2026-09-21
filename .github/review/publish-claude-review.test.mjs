@@ -260,7 +260,7 @@ test("принимает русский текст с ограниченными
   assert.deepEqual(validateReviewJson(review), review);
 });
 
-test("принимает длинные технические идентификаторы только из точного diff", () => {
+test("отклоняет длинные технические идентификаторы даже из точного diff", () => {
   const identifiers = [
     "getYooKassaRenewalBeforeConfirmingPayment",
     "get_yookassa_renewal_before_confirming_payment",
@@ -271,9 +271,9 @@ test("принимает длинные технические идентифи�
     const review = validReview();
     review.findings[0].title = `Исправьте ${identifier}`;
 
-    assert.deepEqual(
-      validateReviewJson(review, { diff: `+const result = ${identifier};` }),
-      review,
+    assert.throws(
+      () => validateReviewJson(review, { diff: `+const result = ${identifier};` }),
+      /русский текст/u,
     );
   }
 });

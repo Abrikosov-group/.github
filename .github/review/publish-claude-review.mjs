@@ -13,7 +13,6 @@ const TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT = 3;
 const MAX_TECHNICAL_IDENTIFIER_LETTERS = 32;
 const MAX_CAMEL_CASE_SEGMENTS = 4;
 const MAX_SEPARATED_IDENTIFIER_SEGMENTS = 2;
-const MAX_MATCHED_TECHNICAL_IDENTIFIER_WEIGHT = 8;
 const MINIMUM_RAW_RUSSIAN_RATIO = 0.4;
 const TECHNICAL_IDENTIFIER_PATTERN =
   /[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+|\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9]{1,}\b/gu;
@@ -82,9 +81,10 @@ function weightedTechnicalIdentifier(value, matchedTechnicalIdentifiers) {
     ? MAX_SEPARATED_IDENTIFIER_SEGMENTS
     : MAX_CAMEL_CASE_SEGMENTS;
   if (latinLetterCount > MAX_TECHNICAL_IDENTIFIER_LETTERS || segments.length > maximumSegments) {
-    return matchedTechnicalIdentifiers.has(value)
-      ? "x".repeat(MAX_MATCHED_TECHNICAL_IDENTIFIER_WEIGHT)
-      : value;
+    // A diff match never relaxes the length or structure limits.  Overlong
+    // strings remain fully visible to both language-ratio checks, so a
+    // prompt-injection payload cannot become a zero-cost "identifier".
+    return value;
   }
 
   const weight = Math.max(
