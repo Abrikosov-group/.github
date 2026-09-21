@@ -348,7 +348,7 @@ jobs:
               event_base_ref="$(jq -er '.pull_request.base.ref' "${GITHUB_EVENT_PATH}")"
               event_head_sha="$(jq -er '.pull_request.head.sha' "${GITHUB_EVENT_PATH}")"
               event_head_repository="$(jq -er '.pull_request.head.repo.full_name' "${GITHUB_EVENT_PATH}")"
-              event_draft="$(jq -er '.pull_request | (.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true"))' "${GITHUB_EVENT_PATH}")"
+              event_draft="$(jq -er '.pull_request | (.draft == false or (.draft == true and env.REVIEW_DRAFTS == "true")) | tostring' "${GITHUB_EVENT_PATH}")"
               if [[ "${event_pr_number}" != "${PR_NUMBER}" ||
                     "${event_head_sha}" != "${EXPECTED_HEAD_SHA}" ||
                     "${event_head_repository}" != "${REPOSITORY}" ||
@@ -555,7 +555,7 @@ jobs:
 
           if [[ "${MODE}" == "all" ]]; then
             heading='### 🚀 Двойное ИИ-ревью запущено'
-            reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+            reviewers="- ⏳ Codex (модель выбирается по размеру, \`xhigh\`) — запущен
           - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
           else
@@ -621,7 +621,7 @@ jobs:
           fi
 
   prepare-codex:
-    name: Подготовить безопасный вход для Codex Spark
+    name: Подготовить безопасный вход и выбрать модель Codex
     needs: [context, start-status]
     if: needs.context.outputs.mode == 'all'
     runs-on:
@@ -756,59 +756,6 @@ jobs:
             echo 'BINARY_SUMMARY_EOF'
           } >> "${GITHUB_OUTPUT}"
 
-          codex_needed=true
-          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
-            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
-            fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
-            coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
-            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
-            existing="$(jq -c \
-              --arg marker "${marker}" \
-              --arg fallback_marker "${fallback_marker}" \
-              --arg fallback_enabled "${CODEX_FALLBACK_ENABLED:-false}" \
-              --arg coverage_marker "${coverage_marker}" \
-              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
-              '[.[][]? | select(
-                .user.login == $login and
-                (((.body // "") | contains($marker)) or
-                  ($fallback_enabled == "true" and
-                   ((.body // "") | contains($fallback_marker)) and
-                   ((.body // "") | contains("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")))) and
-                ((.body // "") | contains($coverage_marker))
-              )] | sort_by(.id) | last // null' \
-              <<< "${reviews}")"
-            if [[ "${existing}" != "null" ]]; then
-              if blocking_findings="$(jq -er '
-                [
-                  (.body // "") |
-                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
-                ] as $matches |
-                select(($matches | length) == 1) |
-                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
-                [$counts.p0, $counts.p1, $counts.p2] |
-                map(tonumber) |
-                select(all(.[]; . <= 9007199254740991)) |
-                add |
-                select(. <= 9007199254740991)
-              ' <<< "${existing}")"; then
-                review_model='gpt-5.3-codex-spark'
-                if jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
-                  review_model='gpt-5.6-sol'
-                fi
-                echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
-                codex_needed=false
-                echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
-                echo "Актуальное ревью Codex (${review_model}) для точного binary manifest уже существует"
-                if [[ "${DEEPSEEK_ENABLED:-false}" != "true" ]]; then
-                  echo "needed=false" >> "${GITHUB_OUTPUT}"
-                  exit 0
-                fi
-              fi
-              echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
-            fi
-          fi
-          echo "needed=${codex_needed}" >> "${GITHUB_OUTPUT}"
-
           jq -n '{
             type: "object",
             properties: {
@@ -871,10 +818,6 @@ jobs:
           : > "${input_dir}/empty"
           prompt_overhead="$(write_prompt "${input_dir}/empty" "${input_dir}/empty" | wc -c | tr -d '[:space:]')"
           projected_prompt_size=$((prompt_overhead + manifest_size + diff_size))
-          if (( projected_prompt_size > 524288 )); then
-            echo "::error::Вход Codex после подготовки — ${projected_prompt_size} байт; предел 512 KiB. Разделите текстовые изменения PR"
-            exit 1
-          fi
           write_prompt \
             "${input_dir}/binary-manifest.json" \
             "${input_dir}/pull-request.diff" \
@@ -886,13 +829,77 @@ jobs:
             echo "::error::Размер prompt изменился после preflight: projected=${projected_prompt_size}, actual=${prompt_size}, overhead=${prompt_overhead}, manifest=${manifest_size}, diff=${diff_size}"
             exit 1
           fi
+          schema_size="$(wc -c < "${input_dir}/review.schema.json" | tr -d '[:space:]')"
+          visible_input_size=$((prompt_size + schema_size))
+          if (( visible_input_size <= 229376 )); then
+            review_model="gpt-5.3-codex-spark"
+            review_model_name="GPT-5.3-Codex-Spark"
+          elif (( visible_input_size <= 672883 )); then
+            review_model="gpt-5.6-sol"
+            review_model_name="GPT-5.6 Sol"
+          else
+            echo "::error::Видимый вход Codex — ${visible_input_size} байт и превышает проверенный предел 672883 байт. Разделите текстовые изменения PR"
+            exit 1
+          fi
+          codex_needed=true
+          if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
+            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:${review_model} -->"
+            fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
+            coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
+            reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
+            existing="$(jq -c \
+              --arg marker "${marker}" \
+              --arg fallback_marker "${fallback_marker}" \
+              --arg fallback_enabled "${CODEX_FALLBACK_ENABLED:-false}" \
+              --arg coverage_marker "${coverage_marker}" \
+              --arg login "${REVIEW_PUBLISHER_LOGIN}" \
+              '[.[][]? | select(
+                .user.login == $login and
+                (((.body // "") | contains($marker)) or
+                  ($fallback_enabled == "true" and
+                   ((.body // "") | contains($fallback_marker)) and
+                   ((.body // "") | contains("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")))) and
+                ((.body // "") | contains($coverage_marker))
+              )] | sort_by(.id) | last // null' \
+              <<< "${reviews}")"
+            if [[ "${existing}" != "null" ]]; then
+              if blocking_findings="$(jq -er '
+                [
+                  (.body // "") |
+                  match("<!-- review-findings:P0=(?<p0>[0-9]+);P1=(?<p1>[0-9]+);P2=(?<p2>[0-9]+) -->"; "g")
+                ] as $matches |
+                select(($matches | length) == 1) |
+                ($matches[0].captures | map({(.name): .string}) | add) as $counts |
+                [$counts.p0, $counts.p1, $counts.p2] |
+                map(tonumber) |
+                select(all(.[]; . <= 9007199254740991)) |
+                add |
+                select(. <= 9007199254740991)
+              ' <<< "${existing}")"; then
+                if [[ "${review_model}" != "gpt-5.6-sol" ]] &&
+                   jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
+                  review_model='gpt-5.6-sol'
+                  review_model_name='GPT-5.6 Sol'
+                fi
+                codex_needed=false
+                echo "blocking_findings=${blocking_findings}" >> "${GITHUB_OUTPUT}"
+                echo "Актуальное ревью ${review_model_name} для точного binary manifest уже существует"
+              else
+                echo "::notice::Существующее ревью Codex не содержит доверенных метрик или exact manifest marker"
+              fi
+            fi
+          fi
+          echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"
+          echo "needed=${codex_needed}" >> "${GITHUB_OUTPUT}"
           {
-            echo "### Вход Codex Spark"
+            echo "### Вход Codex"
             echo
+            echo "- Модель: ${review_model_name}"
             echo "- Текстовый diff: ${diff_size} байт"
             echo "- Manifest бинарных файлов: ${manifest_size} байт"
             echo "- Бинарных файлов: ${binary_files}"
             echo "- Итоговый prompt: ${prompt_size} байт"
+            echo "- Видимый вход со схемой: ${visible_input_size} байт"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           latest_pr_json="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
@@ -1021,6 +1028,7 @@ jobs:
       - name: Проверить снимок и опубликовать отчёт DeepSeek
         env:
           GH_TOKEN: ${{ steps.publisher-token.outputs.token || github.token }}
+          REPOSITORY: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
@@ -1031,7 +1039,7 @@ jobs:
         run: node _review_infra/.github/review/publish-deepseek-review.mjs
 
   analyze-codex:
-    name: Проанализировать PR с Codex и разрешённым резервом
+    name: Проанализировать PR с выбранной моделью Codex
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
@@ -1101,6 +1109,7 @@ jobs:
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+          REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
         run: |
           set -euo pipefail
           node "${REVIEW_ROOT}/input/run-codex-review.mjs"
@@ -1197,7 +1206,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model }}
+          REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
           REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/codex/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/codex/pull-request.diff
           BINARY_MANIFEST_PATH: ${{ github.workspace }}/.review-input/codex/binary-manifest.json
@@ -1851,25 +1860,37 @@ jobs:
             exit 1
           fi
 
-          codex_model_label='GPT-5.3-Codex-Spark'
+          codex_model_label='Codex'
+          if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.3-codex-spark" ]]; then
+            codex_model_label='GPT-5.3-Codex-Spark'
+          fi
           if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.6-sol" ]]; then
             codex_model_label='GPT-5.6 Sol'
           fi
           codex_ok=false
+          codex_missing=false
+          codex_launch_missing=false
           if [[ "${MODE}" == "claude" ]]; then
             codex_ok=true
             codex_line=""
           elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
+            codex_launch_missing=true
+            codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — актуальное ревью уже существует"
+          elif [[ "${CODEX_ANALYZE_RESULT}" == "skipped" ]]; then
+            codex_launch_missing=true
+            codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — запуск ревью не выполнен"
           elif [[ "${CODEX_ANALYZE_RESULT}" == "success" &&
                   "${CODEX_PUBLISH_RESULT}" == "success" ]]; then
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — ревью опубликовано"
           else
-            codex_line="- ❌ Codex (\`xhigh\`) — анализ или публикация завершились ошибкой; попытки указаны в записи раунда"
+            # C3 rule 6: a missing review report is explicit and advisory.
+            codex_ok=true
+            codex_missing=true
+            codex_line="- ⚠️ Codex (\`xhigh\`) — отчёт не получен; причина и попытки указаны в записи раунда, отсутствие отчёта не блокирует C3"
           fi
 
           if [[ "${CODEX_FALLBACK_USED:-false}" == "true" ]]; then
@@ -1877,37 +1898,50 @@ jobs:
           fi
 
           claude_ok=false
-          if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
-            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — анализ завершился ошибкой"
-          elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
+          claude_missing=false
+          claude_launch_missing=false
+          if [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
             claude_ok=true
             claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — актуальное ревью уже существует"
+          elif [[ "${CLAUDE_ANALYZE_RESULT}" == "skipped" ]]; then
+            claude_launch_missing=true
+            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — запуск ревью не выполнен"
+          elif [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
+            claude_ok=true
+            claude_missing=true
+            claude_line="- ⚠️ Claude Sonnet 5 (\`xhigh\`) — отчёт не получен; причина указана в журнале, отсутствие отчёта не блокирует C3"
           elif [[ "${CLAUDE_PUBLISH_RESULT}" == "success" ]]; then
             claude_ok=true
             claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — ревью опубликовано"
           else
-            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — публикация завершилась ошибкой"
+            claude_ok=true
+            claude_missing=true
+            claude_line="- ⚠️ Claude Sonnet 5 (\`xhigh\`) — отчёт не получен; причина указана в журнале, отсутствие отчёта не блокирует C3"
           fi
 
           blocking_findings=0
           if [[ "${MODE}" == "all" ]]; then
-            if [[ "${CODEX_REVIEW_NEEDED}" == "true" ]]; then
-              codex_count="${CODEX_PUBLISHED_BLOCKING_FINDINGS}"
-            else
-              codex_count="${CODEX_REUSED_BLOCKING_FINDINGS}"
+            if [[ "${codex_missing}" != "true" ]]; then
+              if [[ "${CODEX_REVIEW_NEEDED}" == "true" ]]; then
+                codex_count="${CODEX_PUBLISHED_BLOCKING_FINDINGS}"
+              else
+                codex_count="${CODEX_REUSED_BLOCKING_FINDINGS}"
+              fi
+              [[ "${codex_count}" =~ ^[0-9]+$ ]] || codex_ok=false
+              [[ "${codex_count}" =~ ^[0-9]+$ ]] &&
+                blocking_findings=$((blocking_findings + codex_count))
             fi
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] || codex_ok=false
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] &&
-              blocking_findings=$((blocking_findings + codex_count))
           fi
-          if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
-            claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
-          else
-            claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+          if [[ "${claude_missing}" != "true" ]]; then
+            if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
+              claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
+            else
+              claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+            fi
+            [[ "${claude_count}" =~ ^[0-9]+$ ]] || claude_ok=false
+            [[ "${claude_count}" =~ ^[0-9]+$ ]] &&
+              blocking_findings=$((blocking_findings + claude_count))
           fi
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] || claude_ok=false
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] &&
-            blocking_findings=$((blocking_findings + claude_count))
 
           binary_input_ok=false
           if [[ "${MODE}" == "all" ]]; then
@@ -1937,21 +1971,32 @@ jobs:
             binary_summary='Манифесты Codex и Claude отсутствуют, повреждены или не совпадают.'
           fi
 
+          deepseek_line=""
+          if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
+            deepseek_line='- ℹ️ DeepSeek Flash / `max` — отдельная независимая роль; запуск и отчёт смотрите в журнале выполнения, отсутствие отчёта не блокирует C3'
+          fi
+
           if [[ "${MODE}" == "all" && "${codex_ok}" == "true" &&
                 "${claude_ok}" == "true" && "${binary_input_ok}" == "true" &&
                 "${blocking_findings}" == "0" ]]; then
-            heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+            if [[ "${codex_missing}" == "true" || "${claude_missing}" == "true" ]]; then
+              heading='### ⚠️ ИИ-ревью завершено с недоступным отчётом'
+            else
+              heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+            fi
           elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" &&
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
-            heading='### ✅ Ручное ревью Claude завершено без блокеров'
+            if [[ "${claude_missing}" == "true" ]]; then
+              heading='### ⚠️ Ручное ревью Claude завершено без отчёта'
+            else
+              heading='### ✅ Ручное ревью Claude завершено без блокеров'
+            fi
+          elif [[ "${codex_launch_missing}" == "true" || "${claude_launch_missing}" == "true" ]]; then
+            heading='### ❌ ИИ-ревью запущено не полностью'
           else
             heading='### ❌ ИИ-ревью требует внимания'
           fi
 
-          deepseek_line=""
-          if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
-            deepseek_line='DeepSeek Flash / max: отдельная независимая роль. Её исход и отчёт смотрите в журнале выполнения; итоги и счётчик основной пары ниже её не включают. Полученные замечания третьей роли также требуют разбора.'
-          fi
           body="$(cat <<EOF
           ${marker}
           ${heading}
@@ -1988,12 +2033,21 @@ jobs:
 
           if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
             if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" &&
-                  "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
+                  "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" &&
+                  "${codex_launch_missing}" != "true" &&
+                  "${claude_launch_missing}" != "true" ]]; then
               gate_state='success'
-              gate_description='Оба ревью завершены без P0–P2'
+              if [[ "${codex_missing}" == "true" || "${claude_missing}" == "true" ]]; then
+                gate_description='Запуски ревью выполнены, но один или несколько отчётов не получены; это предупреждение и не блокирует C3'
+              else
+                gate_description='Оба ревью завершены без P0–P2'
+              fi
             else
               gate_state='failure'
-              if [[ "${binary_input_ok}" != "true" ]]; then
+              if [[ "${codex_launch_missing}" == "true" ||
+                    "${claude_launch_missing}" == "true" ]]; then
+                gate_description='Не все включённые ревьюверы были запущены'
+              elif [[ "${binary_input_ok}" != "true" ]]; then
                 gate_description='Не удалось подтвердить безопасный вход моделей'
               elif [[ "${blocking_findings}" != "0" ]]; then
                 gate_description='Найдены замечания P0–P2'

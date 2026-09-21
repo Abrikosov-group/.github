@@ -8,6 +8,16 @@ const MAX_BINARY_PATH_LENGTH = 16_384;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 2_000;
 const MAX_DIFF_BYTES = 50 * 1024 * 1024;
+const TECHNICAL_IDENTIFIER_MINIMUM_WEIGHT = 4;
+const TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT = 3;
+const MAX_TECHNICAL_IDENTIFIER_LETTERS = 32;
+const MAX_CAMEL_CASE_SEGMENTS = 4;
+const MAX_SEPARATED_IDENTIFIER_SEGMENTS = 2;
+const MINIMUM_RAW_RUSSIAN_RATIO = 0.4;
+const TECHNICAL_IDENTIFIER_PATTERN = new RegExp(
+  String.raw`(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{0,${MAX_TECHNICAL_IDENTIFIER_LETTERS}}(?:[._/:()[\]-][A-Za-z0-9]{1,${MAX_TECHNICAL_IDENTIFIER_LETTERS}})+(?![A-Za-z0-9])|\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9]{1,}\b`,
+  "gu",
+);
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -60,6 +70,78 @@ function containsSensitiveData(value) {
   return SENSITIVE_DATA_PATTERNS.some((pattern) => pattern.test(value));
 }
 
+function weightedTechnicalIdentifier(value, matchedTechnicalIdentifiers) {
+  // Only an identifier present in the exact diff gets reduced weight. An
+  // unconfirmed model-generated token remains fully visible to both checks.
+  if (!matchedTechnicalIdentifiers.has(value)) {
+    return value;
+  }
+  // A match in the diff may bound an overlong identifier, but never removes
+  // its letters from either language-ratio calculation.
+  const hasSeparator = /[._/:()[\]-]/u.test(value);
+  const segments = value
+    .split(/[._/:()[\]-]+/u)
+    .flatMap((segment) => segment.split(/(?<=[a-z0-9])(?=[A-Z])/u))
+    .filter(Boolean);
+  const latinLetterCount = value.match(/[A-Za-z]/gu)?.length ?? 0;
+  const maximumSegments = hasSeparator
+    ? MAX_SEPARATED_IDENTIFIER_SEGMENTS
+    : MAX_CAMEL_CASE_SEGMENTS;
+  if (latinLetterCount > MAX_TECHNICAL_IDENTIFIER_LETTERS || segments.length > maximumSegments) {
+    // A diff match never relaxes the length or structure limits.  Overlong
+    // strings remain fully visible to both language-ratio checks, so a
+    // prompt-injection payload cannot become a zero-cost "identifier".
+    return value;
+  }
+
+  const weight = Math.max(
+    TECHNICAL_IDENTIFIER_MINIMUM_WEIGHT,
+    segments.length * TECHNICAL_IDENTIFIER_SEGMENT_WEIGHT,
+    Math.ceil(latinLetterCount / 2),
+  );
+  return "x".repeat(weight);
+}
+
+function collectTechnicalIdentifierCandidates(findings) {
+  const candidates = new Set();
+  for (const finding of findings) {
+    for (const value of [finding?.title, finding?.body]) {
+      if (typeof value !== "string" || value.length > MAX_BODY_LENGTH) {
+        continue;
+      }
+      for (const match of value.matchAll(TECHNICAL_IDENTIFIER_PATTERN)) {
+        candidates.add(match[0]);
+      }
+    }
+  }
+  return candidates;
+}
+
+export function collectMatchedTechnicalIdentifiers(diff, candidates) {
+  const matched = new Set();
+  if (typeof diff !== "string" || !(candidates instanceof Set) || candidates.size === 0) {
+    return matched;
+  }
+
+  for (const match of diff.matchAll(TECHNICAL_IDENTIFIER_PATTERN)) {
+    if (candidates.has(match[0])) {
+      matched.add(match[0]);
+    }
+  }
+  return matched;
+}
+
+function collectMatchedIdentifiers(diff, findings) {
+  if (typeof diff !== "string") {
+    return new Set();
+  }
+
+  return collectMatchedTechnicalIdentifiers(
+    diff,
+    collectTechnicalIdentifierCandidates(findings),
+  );
+}
+
 function makeInvisibleUnicodeVisible(value, label) {
   if (typeof value !== "string") {
     return value;
@@ -91,7 +173,16 @@ function assertExactKeys(value, expectedKeys, label) {
   }
 }
 
-function assertSafeText(value, { label, maximumLength, multiline, requireRussian = false }) {
+function assertSafeText(
+  value,
+  {
+    label,
+    maximumLength,
+    multiline,
+    requireRussian = false,
+    matchedTechnicalIdentifiers = new Set(),
+  },
+) {
   if (typeof value !== "string" || value.length === 0 || value.length > maximumLength) {
     throw new Error(`${label} должен быть непустой строкой длиной не более ${maximumLength} символов.`);
   }
@@ -113,14 +204,29 @@ function assertSafeText(value, { label, maximumLength, multiline, requireRussian
   }
 
   if (requireRussian) {
-    const prose = value
+    const unweightedProse = value
       .replace(/```[\s\S]*?```/gu, " ")
       .replace(/`[^`\n]*`/gu, " ")
       .replace(/https?:\/\/\S+/gu, " ");
+    const prose = unweightedProse
+      .replace(
+        TECHNICAL_IDENTIFIER_PATTERN,
+        (identifier) => weightedTechnicalIdentifier(identifier, matchedTechnicalIdentifiers),
+      );
+    // The raw ratio intentionally keeps the full spelling of every
+    // identifier. It prevents a finding from hiding too much non-Russian text
+    // behind several short identifiers that happen to occur in the diff.
+    const rawProse = unweightedProse;
     const letters = prose.match(/\p{L}/gu) ?? [];
     const russianLetters = prose.match(/[А-ЯЁа-яё]/gu) ?? [];
+    const rawLetters = rawProse.match(/\p{L}/gu) ?? [];
+    const rawRussianLetters = rawProse.match(/[А-ЯЁа-яё]/gu) ?? [];
 
-    if (russianLetters.length < 3 || russianLetters.length / letters.length < 0.5) {
+    if (
+      russianLetters.length < 3
+      || russianLetters.length / letters.length < 0.5
+      || rawRussianLetters.length / rawLetters.length < MINIMUM_RAW_RUSSIAN_RATIO
+    ) {
       throw new Error(`${label} должен содержать преимущественно русский текст.`);
     }
   }
@@ -148,7 +254,7 @@ function validatePath(value) {
   return value;
 }
 
-export function validateReviewJson(rawReview) {
+export function validateReviewJson(rawReview, { diff = null } = {}) {
   let review;
   try {
     review = typeof rawReview === "string" ? JSON.parse(rawReview) : rawReview;
@@ -162,6 +268,8 @@ export function validateReviewJson(rawReview) {
   if (!Array.isArray(review.findings) || review.findings.length > MAX_FINDINGS) {
     throw new Error(`Поле findings должно быть массивом не более чем из ${MAX_FINDINGS} элементов.`);
   }
+
+  const matchedTechnicalIdentifiers = collectMatchedIdentifiers(diff, review.findings);
 
   const anchors = new Set();
   const findings = review.findings.map((finding, index) => {
@@ -186,12 +294,14 @@ export function validateReviewJson(rawReview) {
       maximumLength: MAX_TITLE_LENGTH,
       multiline: false,
       requireRussian: true,
+      matchedTechnicalIdentifiers,
     });
     const body = assertSafeText(makeInvisibleUnicodeVisible(finding.body, `${label}: body`), {
       label: `${label}: body`,
       maximumLength: MAX_BODY_LENGTH,
       multiline: true,
       requireRussian: true,
+      matchedTechnicalIdentifiers,
     });
 
     const anchor = `${path}\u0000${finding.side}\u0000${finding.line}`;
@@ -337,7 +447,8 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
   }
   if (!REVIEW_MODELS.has(reviewModel)) {
     throw new Error(
-      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5 или gpt-5.3-codex-spark.",
+      "REVIEW_MODEL должен быть deepseek-flash, claude-sonnet-5, claude-opus-5, " +
+        "gpt-5.3-codex-spark или gpt-5.6-sol.",
     );
   }
   return `<!-- ${REVIEW_MODELS.get(reviewModel).marker}:${baseSha}:${headSha}:${reviewModel} -->`;
@@ -749,7 +860,8 @@ export async function main() {
   const rawReview = process.env.REVIEW_JSON_FILE
     ? readFileSync(process.env.REVIEW_JSON_FILE, "utf8")
     : requireEnvironment("REVIEW_JSON");
-  const review = validateReviewJson(rawReview);
+  const diff = process.env.DIFF_PATH ? exactDiff() : null;
+  const review = validateReviewJson(rawReview, { diff });
   const rawManifest = process.env.BINARY_MANIFEST_PATH
     ? readFileSync(process.env.BINARY_MANIFEST_PATH, "utf8")
     : requireEnvironment("BINARY_MANIFEST_JSON");
@@ -789,7 +901,7 @@ export async function main() {
   }
 
   const { anchored, unanchored } = review.findings.length > 0
-    ? partitionFindingAnchors(review.findings, exactDiff())
+    ? partitionFindingAnchors(review.findings, diff ?? exactDiff())
     : { anchored: [], unanchored: [] };
   if (unanchored.length > 0) {
     console.warn(
