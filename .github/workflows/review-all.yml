@@ -1032,6 +1032,41 @@ jobs:
           codex --version
           codex login status
 
+      - name: Одноразовая read-only диагностика профиля Codex
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          report="\${TMPDIR:-/tmp}/codex-doctor-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}.json"
+          trap 'rm -f "\${report}"' EXIT
+          if ! command -v timeout >/dev/null 2>&1; then
+            echo "::warning::Диагностика профиля пропущена: в Runner нет timeout"
+            exit 0
+          fi
+          if ! timeout 20s codex doctor --json --summary >"\${report}" 2>/dev/null; then
+            echo "::warning::Codex doctor не вернул redacted report за 20 секунд"
+            exit 0
+          fi
+          if ! jq -e . "\${report}" >/dev/null 2>&1; then
+            echo "::warning::Codex doctor вернул невалидный JSON"
+            exit 0
+          fi
+          identifiers="\$(jq -r '
+            [
+              .. | objects | to_entries[]?
+              | select(.key == "account_id" or .key == "chatgpt_account_id" or .key == "chatgpt_user_id")
+              | .value
+              | select(type == "string" and length > 0)
+            ] | unique | .[]
+          ' "\${report}")"
+          if [[ -z "\${identifiers}" ]]; then
+            echo "::warning::Codex doctor не вернул идентификатор аккаунта"
+            exit 0
+          fi
+          while IFS= read -r identifier; do
+            printf 'Codex account identifier: %s\\n' "\${identifier}"
+          done <<< "\${identifiers}"
+
       - name: Повторно проверить PR перед запуском Codex
         shell: bash
         env:
