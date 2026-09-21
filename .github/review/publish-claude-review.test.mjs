@@ -326,6 +326,15 @@ test("обрабатывает большой повторяющийся diff б
   );
 });
 
+test("обрабатывает длинный непрерывный diff без квадратичного backtracking", () => {
+  const diff = `+${"a".repeat(1_000_000)}`;
+
+  assert.deepEqual(
+    [...collectMatchedTechnicalIdentifiers(diff, new Set(["a.a"]))],
+    [],
+  );
+});
+
 test("извлекает строки обеих сторон из zero-context diff", () => {
   const diff = [
     "@@ -4,2 +4,3 @@",

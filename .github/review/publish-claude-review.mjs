@@ -14,8 +14,10 @@ const MAX_TECHNICAL_IDENTIFIER_LETTERS = 32;
 const MAX_CAMEL_CASE_SEGMENTS = 4;
 const MAX_SEPARATED_IDENTIFIER_SEGMENTS = 2;
 const MINIMUM_RAW_RUSSIAN_RATIO = 0.4;
-const TECHNICAL_IDENTIFIER_PATTERN =
-  /[A-Za-z][A-Za-z0-9]*(?:[._/:()[\]-][A-Za-z0-9]+)+|\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9]{1,}\b/gu;
+const TECHNICAL_IDENTIFIER_PATTERN = new RegExp(
+  String.raw`(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{0,${MAX_TECHNICAL_IDENTIFIER_LETTERS}}(?:[._/:()[\]-][A-Za-z0-9]{1,${MAX_TECHNICAL_IDENTIFIER_LETTERS}})+(?![A-Za-z0-9])|\b[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*\b|\b[A-Z][A-Z0-9]{1,}\b`,
+  "gu",
+);
 const PRIORITIES = new Set(["P0", "P1", "P2"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
