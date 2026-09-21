@@ -2433,8 +2433,30 @@ test("итог показывает Sol и не блокирует C3 при н�
   const failure = run({ CODEX_ANALYZE_RESULT: "failure", CODEX_PUBLISH_RESULT: "skipped", CODEX_PUBLISHED_BLOCKING_FINDINGS: "" });
   assert.equal(failure.status, 0, failure.stderr);
   assert.match(failure.ghLog, /state=success/u);
-  assert.match(failure.ghLog, /Отчёт одного или нескольких ревьюеров не получен; отсутствие отчёта не блокирует C3/u);
+  assert.match(failure.ghLog, /Запуски ревью выполнены, но один или несколько отчётов не получены; это предупреждение и не блокирует C3/u);
   assert.match(failure.ghLog, /ИИ-ревью завершено с недоступным отчётом/u);
+  const allMissing = run({
+    CODEX_ANALYZE_RESULT: "failure",
+    CODEX_PUBLISH_RESULT: "skipped",
+    CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+    CLAUDE_ANALYZE_RESULT: "failure",
+    CLAUDE_PUBLISH_RESULT: "skipped",
+    CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "",
+  });
+  assert.equal(allMissing.status, 0, allMissing.stderr);
+  assert.match(allMissing.ghLog, /state=success/u);
+  assert.match(allMissing.ghLog, /Запуски ревью выполнены, но один или несколько отчётов не получены/u);
+  assert.match(allMissing.ghLog, /Codex.*отчёт не получен/u);
+  assert.match(allMissing.ghLog, /Claude Sonnet 5.*отчёт не получен/u);
+  const skipped = run({
+    CODEX_ANALYZE_RESULT: "skipped",
+    CODEX_PUBLISH_RESULT: "skipped",
+    CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+  });
+  assert.equal(skipped.status, 0, skipped.stderr);
+  assert.match(skipped.ghLog, /state=failure/u);
+  assert.match(skipped.ghLog, /Не все включённые ревьюверы были запущены/u);
+  assert.match(skipped.ghLog, /GPT-5\.6 Sol.*запуск ревью не выполнен/u);
   const findings = run({ CODEX_PUBLISHED_BLOCKING_FINDINGS: "1" });
   assert.equal(findings.status, 0, findings.stderr);
   assert.match(findings.ghLog, /state=failure/u);
@@ -2468,5 +2490,5 @@ test("ошибка подготовки входа остаётся блокир
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.ghLog, /state=failure/u);
-  assert.match(result.ghLog, /Ревью не получено: техническая ошибка анализа или публикации/u);
+  assert.match(result.ghLog, /Не все включённые ревьюверы были запущены/u);
 });

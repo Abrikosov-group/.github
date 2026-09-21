@@ -1868,14 +1868,19 @@ jobs:
           fi
           codex_ok=false
           codex_missing=false
+          codex_launch_missing=false
           if [[ "${MODE}" == "claude" ]]; then
             codex_ok=true
             codex_line=""
           elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
+            codex_launch_missing=true
             codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — актуальное ревью уже существует"
+          elif [[ "${CODEX_ANALYZE_RESULT}" == "skipped" ]]; then
+            codex_launch_missing=true
+            codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — запуск ревью не выполнен"
           elif [[ "${CODEX_ANALYZE_RESULT}" == "success" &&
                   "${CODEX_PUBLISH_RESULT}" == "success" ]]; then
             codex_ok=true
@@ -1893,13 +1898,17 @@ jobs:
 
           claude_ok=false
           claude_missing=false
-          if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
+          claude_launch_missing=false
+          if [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
+            claude_ok=true
+            claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — актуальное ревью уже существует"
+          elif [[ "${CLAUDE_ANALYZE_RESULT}" == "skipped" ]]; then
+            claude_launch_missing=true
+            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — запуск ревью не выполнен"
+          elif [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
             claude_ok=true
             claude_missing=true
             claude_line="- ⚠️ Claude Sonnet 5 (\`xhigh\`) — отчёт не получен; причина указана в журнале, отсутствие отчёта не блокирует C3"
-          elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
-            claude_ok=true
-            claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — актуальное ревью уже существует"
           elif [[ "${CLAUDE_PUBLISH_RESULT}" == "success" ]]; then
             claude_ok=true
             claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — ревью опубликовано"
@@ -1961,6 +1970,11 @@ jobs:
             binary_summary='Манифесты Codex и Claude отсутствуют, повреждены или не совпадают.'
           fi
 
+          deepseek_line=""
+          if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
+            deepseek_line='- ℹ️ DeepSeek Flash / `max` — отдельная независимая роль; запуск и отчёт смотрите в журнале выполнения, отсутствие отчёта не блокирует C3'
+          fi
+
           if [[ "${MODE}" == "all" && "${codex_ok}" == "true" &&
                 "${claude_ok}" == "true" && "${binary_input_ok}" == "true" &&
                 "${blocking_findings}" == "0" ]]; then
@@ -1976,14 +1990,12 @@ jobs:
             else
               heading='### ✅ Ручное ревью Claude завершено без блокеров'
             fi
+          elif [[ "${codex_launch_missing}" == "true" || "${claude_launch_missing}" == "true" ]]; then
+            heading='### ❌ ИИ-ревью запущено не полностью'
           else
             heading='### ❌ ИИ-ревью требует внимания'
           fi
 
-          deepseek_line=""
-          if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
-            deepseek_line='DeepSeek Flash / max: отдельная независимая роль. Её исход и отчёт смотрите в журнале выполнения; итоги и счётчик основной пары ниже её не включают. Полученные замечания третьей роли также требуют разбора.'
-          fi
           body="$(cat <<EOF
           ${marker}
           ${heading}
@@ -2020,16 +2032,21 @@ jobs:
 
           if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
             if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" &&
-                  "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
+                  "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" &&
+                  "${codex_launch_missing}" != "true" &&
+                  "${claude_launch_missing}" != "true" ]]; then
               gate_state='success'
               if [[ "${codex_missing}" == "true" || "${claude_missing}" == "true" ]]; then
-                gate_description='Отчёт одного или нескольких ревьюеров не получен; отсутствие отчёта не блокирует C3'
+                gate_description='Запуски ревью выполнены, но один или несколько отчётов не получены; это предупреждение и не блокирует C3'
               else
                 gate_description='Оба ревью завершены без P0–P2'
               fi
             else
               gate_state='failure'
-              if [[ "${binary_input_ok}" != "true" ]]; then
+              if [[ "${codex_launch_missing}" == "true" ||
+                    "${claude_launch_missing}" == "true" ]]; then
+                gate_description='Не все включённые ревьюверы были запущены'
+              elif [[ "${binary_input_ok}" != "true" ]]; then
                 gate_description='Не удалось подтвердить безопасный вход моделей'
               elif [[ "${blocking_findings}" != "0" ]]; then
                 gate_description='Найдены замечания P0–P2'
