@@ -2418,7 +2418,7 @@ test("Sol повторно используется только при opt-in �
   }
 });
 
-test("итог показывает Sol и различает технический сбой и замечания", () => {
+test("итог показывает Sol и не блокирует C3 при недоступном отчёте", () => {
   const common = { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", STATUS_COMMENT_ID: "99",
     BASE_SHA: "a".repeat(40), HEAD_SHA: "b".repeat(40), MODE: "all",
     RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1", REVIEW_GATE_CONTEXT: "Двойное ИИ-ревью",
@@ -2432,10 +2432,41 @@ test("итог показывает Sol и различает техническ
   assert.match(success.ghLog, /state=success/u);
   const failure = run({ CODEX_ANALYZE_RESULT: "failure", CODEX_PUBLISH_RESULT: "skipped", CODEX_PUBLISHED_BLOCKING_FINDINGS: "" });
   assert.equal(failure.status, 0, failure.stderr);
-  assert.match(failure.ghLog, /state=failure/u);
-  assert.match(failure.ghLog, /Ревью не получено: техническая ошибка/u);
+  assert.match(failure.ghLog, /state=success/u);
+  assert.match(failure.ghLog, /Отчёт одного или нескольких ревьюеров не получен; отсутствие отчёта не блокирует C3/u);
+  assert.match(failure.ghLog, /ИИ-ревью завершено с недоступным отчётом/u);
   const findings = run({ CODEX_PUBLISHED_BLOCKING_FINDINGS: "1" });
   assert.equal(findings.status, 0, findings.stderr);
   assert.match(findings.ghLog, /state=failure/u);
   assert.match(findings.ghLog, /Найдены замечания P0–P2/u);
+});
+
+test("ошибка подготовки входа остаётся блокирующей", () => {
+  const result = executeRunScript({
+    stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock,
+    env: {
+      REPOSITORY: "Abrikosov-group/project",
+      PR_NUMBER: "17",
+      STATUS_COMMENT_ID: "99",
+      BASE_SHA: "a".repeat(40),
+      HEAD_SHA: "b".repeat(40),
+      MODE: "all",
+      RUN_URL: "https://github.com/abrikosov-group/project/actions/runs/1",
+      REVIEW_GATE_CONTEXT: "Двойное ИИ-ревью",
+      CODEX_PREPARE_RESULT: "failure",
+      CODEX_REVIEW_NEEDED: "",
+      CODEX_ANALYZE_RESULT: "skipped",
+      CODEX_PUBLISH_RESULT: "skipped",
+      CODEX_PUBLISHED_BLOCKING_FINDINGS: "",
+      CODEX_REUSED_BLOCKING_FINDINGS: "",
+      CLAUDE_ANALYZE_RESULT: "success",
+      CLAUDE_REVIEW_NEEDED: "true",
+      CLAUDE_PUBLISH_RESULT: "success",
+      CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "0",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.ghLog, /state=failure/u);
+  assert.match(result.ghLog, /Ревью не получено: техническая ошибка анализа или публикации/u);
 });

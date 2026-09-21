@@ -1867,6 +1867,7 @@ jobs:
             codex_model_label='GPT-5.6 Sol'
           fi
           codex_ok=false
+          codex_missing=false
           if [[ "${MODE}" == "claude" ]]; then
             codex_ok=true
             codex_line=""
@@ -1880,7 +1881,10 @@ jobs:
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — ревью опубликовано"
           else
-            codex_line="- ❌ Codex (\`xhigh\`) — анализ или публикация завершились ошибкой; попытки указаны в записи раунда"
+            # C3 rule 6: a missing review report is explicit and advisory.
+            codex_ok=true
+            codex_missing=true
+            codex_line="- ⚠️ Codex (\`xhigh\`) — отчёт не получен; причина и попытки указаны в записи раунда, отсутствие отчёта не блокирует C3"
           fi
 
           if [[ "${CODEX_FALLBACK_USED:-false}" == "true" ]]; then
@@ -1888,8 +1892,11 @@ jobs:
           fi
 
           claude_ok=false
+          claude_missing=false
           if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
-            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — анализ завершился ошибкой"
+            claude_ok=true
+            claude_missing=true
+            claude_line="- ⚠️ Claude Sonnet 5 (\`xhigh\`) — отчёт не получен; причина указана в журнале, отсутствие отчёта не блокирует C3"
           elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
             claude_ok=true
             claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — актуальное ревью уже существует"
@@ -1897,28 +1904,34 @@ jobs:
             claude_ok=true
             claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — ревью опубликовано"
           else
-            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — публикация завершилась ошибкой"
+            claude_ok=true
+            claude_missing=true
+            claude_line="- ⚠️ Claude Sonnet 5 (\`xhigh\`) — отчёт не получен; причина указана в журнале, отсутствие отчёта не блокирует C3"
           fi
 
           blocking_findings=0
           if [[ "${MODE}" == "all" ]]; then
-            if [[ "${CODEX_REVIEW_NEEDED}" == "true" ]]; then
-              codex_count="${CODEX_PUBLISHED_BLOCKING_FINDINGS}"
-            else
-              codex_count="${CODEX_REUSED_BLOCKING_FINDINGS}"
+            if [[ "${codex_missing}" != "true" ]]; then
+              if [[ "${CODEX_REVIEW_NEEDED}" == "true" ]]; then
+                codex_count="${CODEX_PUBLISHED_BLOCKING_FINDINGS}"
+              else
+                codex_count="${CODEX_REUSED_BLOCKING_FINDINGS}"
+              fi
+              [[ "${codex_count}" =~ ^[0-9]+$ ]] || codex_ok=false
+              [[ "${codex_count}" =~ ^[0-9]+$ ]] &&
+                blocking_findings=$((blocking_findings + codex_count))
             fi
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] || codex_ok=false
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] &&
-              blocking_findings=$((blocking_findings + codex_count))
           fi
-          if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
-            claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
-          else
-            claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+          if [[ "${claude_missing}" != "true" ]]; then
+            if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
+              claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
+            else
+              claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+            fi
+            [[ "${claude_count}" =~ ^[0-9]+$ ]] || claude_ok=false
+            [[ "${claude_count}" =~ ^[0-9]+$ ]] &&
+              blocking_findings=$((blocking_findings + claude_count))
           fi
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] || claude_ok=false
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] &&
-            blocking_findings=$((blocking_findings + claude_count))
 
           binary_input_ok=false
           if [[ "${MODE}" == "all" ]]; then
@@ -1951,10 +1964,18 @@ jobs:
           if [[ "${MODE}" == "all" && "${codex_ok}" == "true" &&
                 "${claude_ok}" == "true" && "${binary_input_ok}" == "true" &&
                 "${blocking_findings}" == "0" ]]; then
-            heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+            if [[ "${codex_missing}" == "true" || "${claude_missing}" == "true" ]]; then
+              heading='### ⚠️ ИИ-ревью завершено с недоступным отчётом'
+            else
+              heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+            fi
           elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" &&
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
-            heading='### ✅ Ручное ревью Claude завершено без блокеров'
+            if [[ "${claude_missing}" == "true" ]]; then
+              heading='### ⚠️ Ручное ревью Claude завершено без отчёта'
+            else
+              heading='### ✅ Ручное ревью Claude завершено без блокеров'
+            fi
           else
             heading='### ❌ ИИ-ревью требует внимания'
           fi
@@ -2001,7 +2022,11 @@ jobs:
             if [[ "${codex_ok}" == "true" && "${claude_ok}" == "true" &&
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
               gate_state='success'
-              gate_description='Оба ревью завершены без P0–P2'
+              if [[ "${codex_missing}" == "true" || "${claude_missing}" == "true" ]]; then
+                gate_description='Отчёт одного или нескольких ревьюеров не получен; отсутствие отчёта не блокирует C3'
+              else
+                gate_description='Оба ревью завершены без P0–P2'
+              fi
             else
               gate_state='failure'
               if [[ "${binary_input_ok}" != "true" ]]; then
