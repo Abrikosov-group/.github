@@ -91,6 +91,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: false
         type: boolean
+      trusted_automatic_bot_logins:
+        description: Логины доверенных App-ботов через запятую для автозапуска без проверки write
+        required: false
+        default: ""
+        type: string
       codex_fallback_enabled:
         description: Однократный резерв GPT-5.6 Sol xhigh при техническом сбое Spark
         required: false
@@ -170,6 +175,7 @@ jobs:
       MANUAL_BASE_REFS: ${{ inputs.manual_base_refs }}
       TRUSTED_WORKFLOW_REPOSITORY: ${{ inputs.trusted_workflow_repository }}
       TRUSTED_WORKFLOW_SHA: ${{ inputs.trusted_workflow_sha }}
+      TRUSTED_AUTOMATIC_BOT_LOGINS: ${{ inputs.trusted_automatic_bot_logins }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -249,9 +255,35 @@ jobs:
             esac
           }
 
+          validate_trusted_bot_logins() {
+            local logins="$1"
+            [[ -z "${logins}" ||
+               "${logins}" =~ ^[A-Za-z0-9-]+\[bot\](,[A-Za-z0-9-]+\[bot\])*$ ]]
+          }
+
+          is_trusted_automatic_bot() {
+            local login="$1"
+            local normalized_login
+            local trusted_login
+            local -a trusted_logins
+            [[ -z "${TRUSTED_AUTOMATIC_BOT_LOGINS}" ]] && return 1
+            normalized_login="$(tr '[:upper:]' '[:lower:]' <<< "${login}")"
+            IFS=',' read -r -a trusted_logins <<< "${TRUSTED_AUTOMATIC_BOT_LOGINS}"
+            for trusted_login in "${trusted_logins[@]}"; do
+              if [[ "${normalized_login}" == "$(tr '[:upper:]' '[:lower:]' <<< "${trusted_login}")" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
           if ! validate_base_refs "${AUTOMATIC_BASE_REFS}" ||
              ! validate_base_refs "${MANUAL_BASE_REFS}"; then
             echo "::error::Список разрешённых base-веток имеет недопустимый формат"
+            exit 1
+          fi
+          if ! validate_trusted_bot_logins "${TRUSTED_AUTOMATIC_BOT_LOGINS}"; then
+            echo "::error::Список доверенных ботов автоматического запуска имеет недопустимый формат"
             exit 1
           fi
 
@@ -341,7 +373,13 @@ jobs:
                 echo "::error::Base-ветка ${event_base_ref} не разрешена для автозапуска"
                 exit 1
               fi
-              require_write_permission "${TRIGGER_ACTOR}"
+              if is_trusted_automatic_bot "${TRIGGER_ACTOR}"; then
+                # Событие pull_request_target и совпадение репозитория head уже проверены выше
+                # общим путём автозапуска; для доверенного бота пропускается только проверка write.
+                echo "::notice::Инициатор ${TRIGGER_ACTOR} входит в список доверенных ботов; проверка write не выполняется"
+              else
+                require_write_permission "${TRIGGER_ACTOR}"
+              fi
               ;;
             *)
               echo "::error::Неизвестный источник запуска ревью"
