@@ -101,6 +101,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: false
         type: boolean
+      codex_account_diagnostic:
+        description: Read-only диагностика профиля Codex только по явному включению
+        required: false
+        default: false
+        type: boolean
       review_gate_context:
         description: Имя commit status двойного ревью; пустое отключает status
         required: false
@@ -1033,7 +1038,7 @@ jobs:
           codex login status
 
       - name: Одноразовая read-only диагностика профиля Codex
-        if: ${{ inputs.command == '/codex-account-diagnostic' }}
+        if: ${{ inputs.codex_account_diagnostic }}
         shell: bash
         continue-on-error: true
         run: |
