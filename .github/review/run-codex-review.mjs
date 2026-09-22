@@ -6,14 +6,18 @@ import { pathToFileURL } from "node:url";
 
 export const PRIMARY_MODEL = "gpt-5.3-codex-spark";
 export const FALLBACK_MODEL = "gpt-5.6-sol";
+export const PROFILE_IDS = ["account-1", "account-2", "account-3"];
+export const PROFILE_LOCK_BUSY_CODE = 75;
+export const DEFAULT_PROFILE_WAIT_MS = 10 * 60_000;
+export const DEFAULT_PROFILE_RETRY_MS = 1_000;
 const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL]);
 export const CODEX_SLOTS = [
-  { slot: "codex-1-spark", profileId: "codex-1", model: PRIMARY_MODEL },
-  { slot: "codex-1-sol", profileId: "codex-1", model: FALLBACK_MODEL },
-  { slot: "codex-2-spark", profileId: "codex-2", model: PRIMARY_MODEL },
-  { slot: "codex-2-sol", profileId: "codex-2", model: FALLBACK_MODEL },
-  { slot: "codex-3-spark", profileId: "codex-3", model: PRIMARY_MODEL },
-  { slot: "codex-3-sol", profileId: "codex-3", model: FALLBACK_MODEL },
+  { slot: "account-1-spark", profileId: "account-1", model: PRIMARY_MODEL },
+  { slot: "account-1-sol", profileId: "account-1", model: FALLBACK_MODEL },
+  { slot: "account-2-spark", profileId: "account-2", model: PRIMARY_MODEL },
+  { slot: "account-2-sol", profileId: "account-2", model: FALLBACK_MODEL },
+  { slot: "account-3-spark", profileId: "account-3", model: PRIMARY_MODEL },
+  { slot: "account-3-sol", profileId: "account-3", model: FALLBACK_MODEL },
 ];
 const SHA = /^[a-f0-9]{40}$/u;
 const MAX_OUTPUT = 2 * 1024 * 1024;
@@ -124,8 +128,9 @@ export function codexInvocation({ model, profileRoot, profileId, workDir, schema
     if (env[key]) cleanEnv[key] = env[key];
   }
   cleanEnv.LANG = env.LANG || "C.UTF-8";
-  cleanEnv.CODEX_HOME = profileRoot && profileId
-    ? join(profileRoot, profileId, ".codex")
+  const isolatedProfile = profileRoot && profileId ? join(resolve(profileRoot), profileId) : null;
+  cleanEnv.CODEX_HOME = isolatedProfile
+    ? join(isolatedProfile, ".codex")
     : env.CODEX_HOME || join(env.HOME, ".codex");
   cleanEnv.TMPDIR = env.RUNNER_TEMP;
   const args = ["exec", "--model", model, "-c", 'model_reasoning_effort="xhigh"',
@@ -134,15 +139,19 @@ export function codexInvocation({ model, profileRoot, profileId, workDir, schema
   for (const feature of ["shell_tool", "apps", "plugins", "browser_use", "computer_use", "image_generation", "multi_agent", "skill_search"]) args.push("--disable", feature);
   if (model === FALLBACK_MODEL) args.push("-c", 'service_tier="default"');
   args.push("--color", "never", "--json", "--cd", workDir, "--output-schema", schemaPath, "--output-last-message", resultPath, "-");
-  return { args, env: cleanEnv };
+  return { args, env: cleanEnv, lockPath: isolatedProfile ? join(isolatedProfile, ".lock") : null };
 }
 
 export async function executeCodex({ model, profileRoot, profileId, workDir, schemaPath, resultPath, prompt, signal,
   binary = "codex", timeoutMs = 20 * 60_000, env = process.env }) {
   const invocation = codexInvocation({ model, profileRoot, profileId, workDir, schemaPath, resultPath, env });
+  const command = invocation.lockPath ? "flock" : binary;
+  const commandArgs = invocation.lockPath
+    ? ["--exclusive", "--nonblock", "--conflict-exit-code", String(PROFILE_LOCK_BUSY_CODE), invocation.lockPath, binary, ...invocation.args]
+    : invocation.args;
   return new Promise((resolveResult, reject) => {
     if (signal.aborted) { reject(new Error("Запуск отменён.")); return; }
-    const child = spawn(binary, invocation.args, { env: invocation.env, cwd: workDir,
+    const child = spawn(command, commandArgs, { env: invocation.env, cwd: workDir,
       detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
     let events = "";
     let stderr = "";
@@ -176,7 +185,8 @@ export async function executeCodex({ model, profileRoot, profileId, workDir, sch
     child.once("error", error => { cleanup(); reject(error); });
     child.once("close", (code, exitSignal) => {
       cleanup();
-      resolveResult({ code, signal: exitSignal, events, stderr, timedOut, overflow });
+      resolveResult({ code, signal: exitSignal, events, stderr, timedOut, overflow,
+        lockBusy: Boolean(invocation.lockPath && code === PROFILE_LOCK_BUSY_CODE) });
     });
   });
 }
@@ -213,7 +223,8 @@ async function reportAt(path) {
 // Workflow reruns additionally have fallback disabled by runAttempt != 1.
 export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL,
-  profileRoot = null }) {
+  profileRoot = null, profileWaitMs = DEFAULT_PROFILE_WAIT_MS,
+  profileRetryMs = DEFAULT_PROFILE_RETRY_MS, sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms)) }) {
   validateSnapshot(snapshot);
   if (!MODELS.has(primaryModel)) throw new Error("Недопустимая основная модель.");
   root = resolve(root);
@@ -230,7 +241,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   await claim.writeFile(JSON.stringify({ snapshot, inputHash }));
   await claim.close();
   const audit = { version: 2, snapshot, inputHash, status: "claimed", attempts: [],
-    fallbackReserved: false, acceptedModel: null, failure: null };
+    fallbackReserved: false, acceptedModel: null, failure: null, busyProfiles: [], exhaustedProfiles: [] };
   const auditPath = join(outputDir, "round.json");
   const persist = async () => {
     const temp = `${auditPath}.${randomUUID()}`;
@@ -248,8 +259,8 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     ? (primaryModel === PRIMARY_MODEL
       ? CODEX_SLOTS
       : CODEX_SLOTS.filter(slot => slot.model === FALLBACK_MODEL))
-    : [{ slot: primaryModel === PRIMARY_MODEL ? "codex-1-spark" : "codex-1-sol", profileId: null, model: primaryModel },
-      ...(primaryModel === PRIMARY_MODEL ? [{ slot: "codex-1-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
+    : [{ slot: primaryModel === PRIMARY_MODEL ? "single-spark" : "single-sol", profileId: null, model: primaryModel },
+      ...(primaryModel === PRIMARY_MODEL ? [{ slot: "single-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
   const attempt = async ({ model, profileId, slot }, reason) => {
     await guard();
     const id = randomUUID();
@@ -274,6 +285,12 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
       await persist();
       throw error;
     }
+    if (result.lockBusy) {
+      record.status = "busy";
+      record.diagnostic = { category: "profile_busy", lockBusy: true };
+      await persist();
+      return { accepted: false, reason: null, profileBusy: true };
+    }
     record.status = "finished";
     record.exitCode = result.code;
     record.signal = result.signal ?? null;
@@ -295,16 +312,42 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   await persist();
   try {
     let previous = null;
-    let exhaustedProfile = null;
-    for (const slot of availableSlots) {
-      if (previous && (!fallbackEnabled || snapshot.runAttempt !== 1 || !previous.reason)) break;
-      if (slot.profileId && slot.profileId === exhaustedProfile) continue;
-      const result = await attempt(slot, previous?.reason ?? null);
-      if (result.accepted) return audit;
-      previous = result;
-      if (result.reason === "account_limit") exhaustedProfile = slot.profileId;
+    const exhaustedProfiles = new Set();
+    const deadline = Date.now() + Math.max(0, Number(profileWaitMs) || 0);
+    let terminalFailure = false;
+    let sawBusy = false;
+    while (true) {
+      const busyThisPass = new Set();
+      sawBusy = false;
+      for (const slot of availableSlots) {
+        if (slot.profileId && (exhaustedProfiles.has(slot.profileId) || busyThisPass.has(slot.profileId))) continue;
+        if (previous) {
+          if (!previous.reason) { terminalFailure = true; break; }
+          const accountRotation = previous.reason === "account_limit";
+          const canUseFallback = fallbackEnabled && snapshot.runAttempt === 1
+            && (!audit.fallbackReserved || Boolean(profileRoot));
+          if (!accountRotation && !canUseFallback) { terminalFailure = true; break; }
+        }
+        const result = await attempt(slot, previous?.reason ?? null);
+        if (result.accepted) return audit;
+        if (result.profileBusy) {
+          sawBusy = true;
+          if (slot.profileId) busyThisPass.add(slot.profileId);
+          if (slot.profileId && !audit.busyProfiles.includes(slot.profileId)) audit.busyProfiles.push(slot.profileId);
+          continue;
+        }
+        previous = result;
+        if (result.reason === "account_limit" && slot.profileId) {
+          exhaustedProfiles.add(slot.profileId);
+          if (!audit.exhaustedProfiles.includes(slot.profileId)) audit.exhaustedProfiles.push(slot.profileId);
+        }
+        if (!result.reason) { terminalFailure = true; break; }
+      }
+      if (terminalFailure || !sawBusy || Date.now() >= deadline) break;
+      await sleep(Math.min(Math.max(0, Number(profileRetryMs) || 0), Math.max(0, deadline - Date.now())));
     }
-    audit.failure = audit.fallbackReserved ? "fallback_unavailable" : "no_eligible_report";
+    audit.failure = audit.fallbackReserved ? "fallback_unavailable"
+      : (sawBusy ? "profile_busy_timeout" : (previous?.reason ?? "no_eligible_report"));
     audit.status = "unavailable";
     await persist();
     throw new Error(`Ревью Codex не получено: ${audit.failure}.`);

@@ -2,14 +2,14 @@ import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 
 export const DIAGNOSTIC_PROTOCOL_VERSION = "1";
-export const PROFILE_IDS = ["codex-1", "codex-2", "codex-3"];
+export const PROFILE_IDS = ["account-1", "account-2", "account-3"];
 export const SLOTS = [
-  { id: "codex-1-spark", profileId: "codex-1", model: "gpt-5.3-codex-spark" },
-  { id: "codex-1-sol", profileId: "codex-1", model: "gpt-5.6-sol" },
-  { id: "codex-2-spark", profileId: "codex-2", model: "gpt-5.3-codex-spark" },
-  { id: "codex-2-sol", profileId: "codex-2", model: "gpt-5.6-sol" },
-  { id: "codex-3-spark", profileId: "codex-3", model: "gpt-5.3-codex-spark" },
-  { id: "codex-3-sol", profileId: "codex-3", model: "gpt-5.6-sol" },
+  { id: "account-1-spark", profileId: "account-1", model: "gpt-5.3-codex-spark" },
+  { id: "account-1-sol", profileId: "account-1", model: "gpt-5.6-sol" },
+  { id: "account-2-spark", profileId: "account-2", model: "gpt-5.3-codex-spark" },
+  { id: "account-2-sol", profileId: "account-2", model: "gpt-5.6-sol" },
+  { id: "account-3-spark", profileId: "account-3", model: "gpt-5.3-codex-spark" },
+  { id: "account-3-sol", profileId: "account-3", model: "gpt-5.6-sol" },
 ];
 
 const MAX_AUTH_BYTES = 1024 * 1024;
@@ -202,7 +202,7 @@ function argumentValue(args, name, fallback = null) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const profileRoot = argumentValue(process.argv.slice(2), "--profile-root")
     ?? process.env.CODEX_ACCOUNT_PROFILE_ROOT
-    ?? "/var/lib/sawabook-review-codex/profiles";
+    ?? "/var/lib/codex-spark-review/accounts";
   const reportPath = argumentValue(process.argv.slice(2), "--report-path");
   if (!reportPath) {
     console.error("Не указан --report-path.");

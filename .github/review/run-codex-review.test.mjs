@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { assertCurrentPR, attemptDiagnostic, codexInvocation, executeCodex, fallbackReason, runRound,
-  PRIMARY_MODEL, FALLBACK_MODEL } from "./run-codex-review.mjs";
+  PRIMARY_MODEL, FALLBACK_MODEL, PROFILE_LOCK_BUSY_CODE } from "./run-codex-review.mjs";
 
 const snapshot = { repository: "example/repo", pr: 1, base: "a".repeat(40), head: "b".repeat(40), runId: "12", runAttempt: 1 };
 const unavailable = { code: 1, events: JSON.stringify({ type: "error", message: `The '${PRIMARY_MODEL}' model is not supported when using Codex with a ChatGPT account.` }) };
@@ -102,7 +102,7 @@ test("account quota advances to the next configured slot", async t => {
 
 test("configured profiles advance Spark then Sol across all three accounts", async t => {
   const h = await harness(t);
-  await runRound({ ...h.options, profileRoot: "/var/lib/sawabook-review-codex/profiles", execute: async r => {
+  await runRound({ ...h.options, profileRoot: "/var/lib/codex-spark-review/accounts", execute: async r => {
     if (h.calls.length < 1) {
       h.calls.push(r);
       return unavailable;
@@ -110,24 +110,24 @@ test("configured profiles advance Spark then Sol across all three accounts", asy
     return h.success(r);
   } });
   assert.deepEqual(h.calls.map(r => [r.slot, r.profileId, r.model]), [
-    ["codex-1-spark", "codex-1", PRIMARY_MODEL],
-    ["codex-1-sol", "codex-1", FALLBACK_MODEL],
+    ["account-1-spark", "account-1", PRIMARY_MODEL],
+    ["account-1-sol", "account-1", FALLBACK_MODEL],
   ]);
   const audit = await h.audit();
-  assert.deepEqual(audit.attempts.map(attempt => attempt.slot), ["codex-1-spark", "codex-1-sol"]);
+  assert.deepEqual(audit.attempts.map(attempt => attempt.slot), ["account-1-spark", "account-1-sol"]);
   assert.equal(audit.acceptedModel, FALLBACK_MODEL);
 });
 
 test("account limit skips Sol on the exhausted account", async t => {
   const h = await harness(t);
   await runRound({ ...h.options, profileRoot: "/profiles", execute: async r => {
-    if (r.slot === "codex-1-spark") {
+    if (r.slot === "account-1-spark") {
       h.calls.push(r);
       return { code: 1, events: JSON.stringify({ type: "error", status: 429, scope: "account", message: "usage limit reached" }) };
     }
     return h.success(r);
   } });
-  assert.deepEqual(h.calls.map(r => r.slot), ["codex-1-spark", "codex-2-spark"]);
+  assert.deepEqual(h.calls.map(r => r.slot), ["account-1-spark", "account-2-spark"]);
 });
 
 test("all six slots are tried at most once after eligible technical failures", async t => {
@@ -137,8 +137,33 @@ test("all six slots are tried at most once after eligible technical failures", a
     return { code: 1, events: JSON.stringify({ type: "error", status: 503, message: "service unavailable" }) };
   } }));
   assert.deepEqual(h.calls.map(r => r.slot), [
-    "codex-1-spark", "codex-1-sol", "codex-2-spark", "codex-2-sol", "codex-3-spark", "codex-3-sol",
+    "account-1-spark", "account-1-sol", "account-2-spark", "account-2-sol", "account-3-spark", "account-3-sol",
   ]);
+});
+
+test("busy profiles are skipped and the audit keeps a bounded lock wait result", async t => {
+  const h = await harness(t);
+  await runRound({ ...h.options, profileRoot: "/profiles", profileWaitMs: 0, execute: async r => {
+    if (r.profileId === "account-1") {
+      h.calls.push(r);
+      return { code: PROFILE_LOCK_BUSY_CODE, events: "", lockBusy: true };
+    }
+    return h.success(r);
+  } });
+  assert.deepEqual(h.calls.map(r => r.profileId), ["account-1", "account-2"]);
+  const audit = await h.audit();
+  assert.deepEqual(audit.busyProfiles, ["account-1"]);
+  assert.equal(audit.acceptedModel, PRIMARY_MODEL);
+  assert.equal(audit.attempts[0].diagnostic.category, "profile_busy");
+});
+
+test("a primary transport reason is preserved when fallback is disabled", async t => {
+  const h = await harness(t);
+  await assert.rejects(runRound({ ...h.options, fallbackEnabled: false, profileRoot: "/profiles", execute: async r => {
+    h.calls.push(r);
+    return { code: 1, events: JSON.stringify({ type: "error", status: 503, code: "service_unavailable" }) };
+  } }));
+  assert.equal((await h.audit()).failure, "provider_technical_failure");
 });
 
 test("a report rejected by schema is not a technical failure, including nonzero CLI exit", async t => {
@@ -363,11 +388,12 @@ test("CLI receives no GitHub token, user config, tools or writable workspace", (
 
 test("profile-specific invocation selects the isolated account home", () => {
   const invocation = codexInvocation({
-    model: PRIMARY_MODEL, profileRoot: "/profiles", profileId: "codex-2",
+    model: PRIMARY_MODEL, profileRoot: "/profiles", profileId: "account-2",
     workDir: "/empty", schemaPath: "/schema", resultPath: "/result",
     env: { HOME: "/home/runner", PATH: "/bin", RUNNER_TEMP: "/tmp" },
   });
-  assert.equal(invocation.env.CODEX_HOME, "/profiles/codex-2/.codex");
+  assert.equal(invocation.env.CODEX_HOME, "/profiles/account-2/.codex");
+  assert.equal(invocation.lockPath, "/profiles/account-2/.lock");
 });
 
 test("Spark preserves its original tier selection and both models retain the UTF-8 locale fallback", () => {

@@ -50,12 +50,12 @@ test("validates three private account profiles and maps six slots without a mode
 test("reports a missing profile for both slots that use it", async () => {
   const root = await fixture();
   try {
-    await rm(join(root, "codex-2"), { recursive: true, force: true });
+    await rm(join(root, "account-2"), { recursive: true, force: true });
     const report = await runDiagnostic({ profileRoot: root, expectedOwnerUid: process.getuid() });
-    const affected = report.slots.filter(slot => slot.slot.startsWith("codex-2-"));
+    const affected = report.slots.filter(slot => slot.slot.startsWith("account-2-"));
     assert.equal(affected.length, 2);
     assert.ok(affected.every(slot => slot.status === "unavailable" && slot.reason === "profile_missing"));
-    assert.ok(report.slots.filter(slot => slot.slot.startsWith("codex-1-"))
+    assert.ok(report.slots.filter(slot => slot.slot.startsWith("account-1-"))
       .every(slot => slot.status === "pending_canary"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -72,14 +72,14 @@ test("reports an absent profile root as unavailable", async () => {
 test("rejects symlinks and unsafe permissions without reading auth content", async () => {
   const root = await fixture();
   try {
-    await rm(join(root, "codex-1"), { recursive: true, force: true });
-    await symlink(join(root, "codex-2"), join(root, "codex-1"));
-    const symlinkResult = await inspectProfile(root, "codex-1", { expectedOwnerUid: process.getuid() });
+    await rm(join(root, "account-1"), { recursive: true, force: true });
+    await symlink(join(root, "account-2"), join(root, "account-1"));
+    const symlinkResult = await inspectProfile(root, "account-1", { expectedOwnerUid: process.getuid() });
     assert.equal(symlinkResult.status, "misconfigured");
     assert.equal(symlinkResult.reason, "profile_not_directory");
 
-    await chmod(join(root, "codex-2", ".codex", "auth.json"), 0o644);
-    const permissionResult = await inspectProfile(root, "codex-2", { expectedOwnerUid: process.getuid() });
+    await chmod(join(root, "account-2", ".codex", "auth.json"), 0o644);
+    const permissionResult = await inspectProfile(root, "account-2", { expectedOwnerUid: process.getuid() });
     assert.equal(permissionResult.status, "misconfigured");
     assert.equal(permissionResult.reason, "auth_permissions");
   } finally {
@@ -89,20 +89,20 @@ test("rejects symlinks and unsafe permissions without reading auth content", asy
 
 test("marks duplicate profile identities as unsafe", () => {
   const results = {
-    "codex-1": { configured: true, profilePermissionsOk: true, loginStatusOk: "unknown",
+    "account-1": { configured: true, profilePermissionsOk: true, loginStatusOk: "unknown",
       profileIsDistinct: null, switchWithoutInteractiveLogin: "unknown",
       status: "pending_canary", reason: "metadata_only", identity: { dev: 1, ino: 2 } },
-    "codex-2": { configured: true, profilePermissionsOk: true, loginStatusOk: "unknown",
+    "account-2": { configured: true, profilePermissionsOk: true, loginStatusOk: "unknown",
       profileIsDistinct: null, switchWithoutInteractiveLogin: "unknown",
       status: "pending_canary", reason: "metadata_only", identity: { dev: 1, ino: 2 } },
-    "codex-3": { configured: true, profilePermissionsOk: true, loginStatusOk: "unknown",
+    "account-3": { configured: true, profilePermissionsOk: true, loginStatusOk: "unknown",
       profileIsDistinct: null, switchWithoutInteractiveLogin: "unknown",
       status: "pending_canary", reason: "metadata_only", identity: { dev: 1, ino: 3 } },
   };
   markDistinctProfiles(results);
-  assert.equal(results["codex-1"].status, "misconfigured");
-  assert.equal(results["codex-2"].reason, "profile_not_distinct");
-  assert.equal(results["codex-3"].profileIsDistinct, true);
+  assert.equal(results["account-1"].status, "misconfigured");
+  assert.equal(results["account-2"].reason, "profile_not_distinct");
+  assert.equal(results["account-3"].profileIsDistinct, true);
 });
 
 test("report contains no absolute profile paths or credential fields", () => {

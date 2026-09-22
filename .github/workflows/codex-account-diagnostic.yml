@@ -6,22 +6,27 @@ name: Диагностика профилей Codex
       review_runner_group:
         description: Группа доверенного runner
         required: false
-        default: sawabook-review
+        default: codex-spark-review
         type: string
       codex_runner_label:
         description: Label runner Codex
         required: false
-        default: sawabook-review-codex
+        default: codex-spark-review
         type: string
       expected_runner_name:
         description: Точное имя runner, которое должно быть подтверждено job
         required: false
-        default: sawabook-review-codex-179-198-117-215
+        default: codex-spark-review-187-127-26-1
+        type: string
+      expected_runner_names:
+        description: Допустимые имена runner через запятую; пусто использует одно точное имя
+        required: false
+        default: ""
         type: string
       profile_root:
         description: Фиксированный корень трёх профилей на runner
         required: false
-        default: /var/lib/sawabook-review-codex/profiles
+        default: /var/lib/codex-spark-review/accounts
         type: string
 
 permissions:
@@ -37,6 +42,7 @@ jobs:
     env:
       CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.profile_root }}
       EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+      EXPECTED_RUNNER_NAMES: ${{ inputs.expected_runner_names }}
 
     steps:
       - name: Проверить доверенный runner
@@ -46,7 +52,14 @@ jobs:
           test "${RUNNER_ENVIRONMENT}" = self-hosted
           test "${RUNNER_OS}" = Linux
           test "${RUNNER_ARCH}" = X64
-          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+          if [[ -n "${EXPECTED_RUNNER_NAMES}" ]]; then
+            case ",${EXPECTED_RUNNER_NAMES}," in
+              *,"${RUNNER_NAME}",*) ;;
+              *) echo "::error::Недоверенный runner: ${RUNNER_NAME}"; exit 1 ;;
+            esac
+          else
+            test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+          fi
 
       - name: Получить диагностический код
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
