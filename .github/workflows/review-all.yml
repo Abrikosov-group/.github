@@ -925,8 +925,11 @@ jobs:
     name: Независимое ревью DeepSeek Flash max
     needs: [context, start-status, prepare-codex]
     if: inputs.deepseek_enabled && needs.context.outputs.mode == 'all'
-    # API-only analysis has no CLI subscription or protected self-hosted runner state.
-    runs-on: ubuntu-24.04
+    # Анализ только через API DeepSeek: без CLI-подписки и без защищённого состояния на runner,
+    # поэтому идёт на orchestration-runner группы ревью, а не на платные runner GitHub.
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -983,7 +986,9 @@ jobs:
     name: Опубликовать отдельное ревью DeepSeek
     needs: [context, start-status, analyze-deepseek]
     if: needs.analyze-deepseek.outputs.state == 'completed'
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 7
     permissions:
       contents: read
