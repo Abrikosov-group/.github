@@ -77,6 +77,11 @@ name: Организационное двойное ИИ-ревью
         description: Точное имя доверенного runner Codex
         required: true
         type: string
+      codex_profile_root:
+        description: Корень трёх изолированных профилей Codex на Runner
+        required: false
+        default: /var/lib/sawabook-review-codex/profiles
+        type: string
       expected_claude_runner_name:
         description: Точное имя доверенного runner Claude
         required: true
@@ -1101,6 +1106,8 @@ jobs:
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+          CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
+          REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
         run: |
           set -euo pipefail
           node "${REVIEW_ROOT}/input/run-codex-review.mjs"

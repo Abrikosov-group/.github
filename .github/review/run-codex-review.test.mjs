@@ -78,17 +78,67 @@ test("timeout followed by a graceful zero exit still reserves one fallback", asy
 });
 
 for (const [name, result] of [
-  ["account quota", { code: 1, events: JSON.stringify({ type: "error", status: 429, message: "usage limit reached" }) }],
   ["authentication", { code: 1, events: JSON.stringify({ type: "error", status: 401, message: "Unauthorized" }) }],
   ["unknown failure", { code: 1, events: "not a structured CLI error" }],
   ["oversized model input", { code: 1, events: JSON.stringify({ type: "error", message: "context window exceeded" }) }],
   ["cancelled process", { ...unavailable, signal: "SIGTERM" }],
   ["model-quoted error", { code: 1, events: JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: unavailable.events } }) }],
-]) test(`${name} does not trigger Sol`, async t => {
+]) test(`${name} does not trigger another account`, async t => {
   const h = await harness(t);
   await assert.rejects(runRound({ ...h.options, execute: async r => { h.calls.push(r); return result; } }));
   assert.equal(h.calls.length, 1);
   assert.equal((await h.audit()).fallbackReserved, false);
+});
+
+test("account quota advances to the next configured slot", async t => {
+  const h = await harness(t);
+  await assert.rejects(runRound({ ...h.options, execute: async r => {
+    h.calls.push(r);
+    return { code: 1, events: JSON.stringify({ type: "error", status: 429, scope: "account", message: "usage limit reached" }) };
+  } }));
+  assert.deepEqual(h.calls.map(r => r.model), [PRIMARY_MODEL, FALLBACK_MODEL]);
+  assert.equal((await h.audit()).fallbackReserved, true);
+});
+
+test("configured profiles advance Spark then Sol across all three accounts", async t => {
+  const h = await harness(t);
+  await runRound({ ...h.options, profileRoot: "/var/lib/sawabook-review-codex/profiles", execute: async r => {
+    if (h.calls.length < 1) {
+      h.calls.push(r);
+      return unavailable;
+    }
+    return h.success(r);
+  } });
+  assert.deepEqual(h.calls.map(r => [r.slot, r.profileId, r.model]), [
+    ["codex-1-spark", "codex-1", PRIMARY_MODEL],
+    ["codex-1-sol", "codex-1", FALLBACK_MODEL],
+  ]);
+  const audit = await h.audit();
+  assert.deepEqual(audit.attempts.map(attempt => attempt.slot), ["codex-1-spark", "codex-1-sol"]);
+  assert.equal(audit.acceptedModel, FALLBACK_MODEL);
+});
+
+test("account limit skips Sol on the exhausted account", async t => {
+  const h = await harness(t);
+  await runRound({ ...h.options, profileRoot: "/profiles", execute: async r => {
+    if (r.slot === "codex-1-spark") {
+      h.calls.push(r);
+      return { code: 1, events: JSON.stringify({ type: "error", status: 429, scope: "account", message: "usage limit reached" }) };
+    }
+    return h.success(r);
+  } });
+  assert.deepEqual(h.calls.map(r => r.slot), ["codex-1-spark", "codex-2-spark"]);
+});
+
+test("all six slots are tried at most once after eligible technical failures", async t => {
+  const h = await harness(t);
+  await assert.rejects(runRound({ ...h.options, profileRoot: "/profiles", execute: async r => {
+    h.calls.push(r);
+    return { code: 1, events: JSON.stringify({ type: "error", status: 503, message: "service unavailable" }) };
+  } }));
+  assert.deepEqual(h.calls.map(r => r.slot), [
+    "codex-1-spark", "codex-1-sol", "codex-2-spark", "codex-2-sol", "codex-3-spark", "codex-3-sol",
+  ]);
 });
 
 test("a report rejected by schema is not a technical failure, including nonzero CLI exit", async t => {
@@ -311,6 +361,15 @@ test("CLI receives no GitHub token, user config, tools or writable workspace", (
   assert.ok(!invocation.args.includes("priority"));
 });
 
+test("profile-specific invocation selects the isolated account home", () => {
+  const invocation = codexInvocation({
+    model: PRIMARY_MODEL, profileRoot: "/profiles", profileId: "codex-2",
+    workDir: "/empty", schemaPath: "/schema", resultPath: "/result",
+    env: { HOME: "/home/runner", PATH: "/bin", RUNNER_TEMP: "/tmp" },
+  });
+  assert.equal(invocation.env.CODEX_HOME, "/profiles/codex-2/.codex");
+});
+
 test("Spark preserves its original tier selection and both models retain the UTF-8 locale fallback", () => {
   for (const model of [PRIMARY_MODEL, FALLBACK_MODEL]) for (const lang of [undefined, "", "ru_RU.UTF-8"]) {
     const invocation = codexInvocation({ model, workDir: "/empty", schemaPath: "/schema", resultPath: "/result",
@@ -415,8 +474,8 @@ test("only an explicitly model-scoped limit qualifies; nested common quota wins"
   const modelError = { type: "error", error: { model: PRIMARY_MODEL, scope: "model", code: "model_rate_limit_exceeded" }, status: 429 };
   const check = events => fallbackReason({ code: 1, events: events.map(JSON.stringify).join("\n"), reportPresent: false });
   assert.equal(check([modelError]), "primary_model_limit");
-  assert.equal(check([{ ...modelError, error: { ...modelError.error, scope: "account" } }]), null);
-  assert.equal(check([modelError, { type: "error", status: 429, error: { message: "Account limit" } }]), null);
+  assert.equal(check([{ ...modelError, error: { ...modelError.error, scope: "account" } }]), "account_limit");
+  assert.equal(check([modelError, { type: "error", status: 429, error: { message: "Account limit" } }]), "account_limit");
   assert.equal(check([{ type: "error", status: 503, error: { message: "Unavailable" } }]), "provider_technical_failure");
   assert.equal(check([{ type: "error", status: 503 }, { type: "error", message: "context window exceeded" }]), null);
   assert.equal(fallbackReason({ code: 1, timedOut: true, events: JSON.stringify({ type: "error", status: 429, message: "Account limit" }) }), null);
