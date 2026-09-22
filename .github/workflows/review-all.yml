@@ -65,6 +65,11 @@ name: Организационное двойное ИИ-ревью
         description: Runner label для анализа Codex
         required: true
         type: string
+      codex_runner_group:
+        description: Отдельная группа runner для пула Codex; пусто использует общую группу
+        required: false
+        default: ""
+        type: string
       claude_runner_label:
         description: Runner label для анализа Claude
         required: true
@@ -76,6 +81,16 @@ name: Организационное двойное ИИ-ревью
       expected_codex_runner_name:
         description: Точное имя доверенного runner Codex
         required: true
+        type: string
+      expected_codex_runner_names:
+        description: Допустимые имена runner Codex через запятую; пусто использует одно точное имя
+        required: false
+        default: ""
+        type: string
+      codex_profile_root:
+        description: Корень трёх изолированных профилей Codex на Runner; пусто сохраняет текущий профиль
+        required: false
+        default: ""
         type: string
       expected_claude_runner_name:
         description: Точное имя доверенного runner Claude
@@ -907,9 +922,14 @@ jobs:
       - name: Добавить доверенный контроллер Codex к артефакту
         if: steps.input.outputs.needed == 'true'
         shell: bash
+        env:
+          CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
         run: |
           set -euo pipefail
           cp _review_infra/.github/review/run-codex-review.mjs .review-input/codex/run-codex-review.mjs
+          if [[ -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ]]; then
+            cp _review_infra/.github/review/codex-account-diagnostic.mjs .review-input/codex/codex-account-diagnostic.mjs
+          fi
 
       - name: Передать обезличенный вход ревью на защищённый Runner
         if: steps.input.outputs.needed == 'true' || inputs.deepseek_enabled
@@ -1062,7 +1082,7 @@ jobs:
     needs: [context, prepare-codex]
     if: needs.prepare-codex.outputs.review_needed == 'true'
     runs-on:
-      group: ${{ inputs.review_runner_group }}
+      group: ${{ inputs.codex_runner_group || inputs.review_runner_group }}
       labels: ${{ inputs.codex_runner_label }}
     timeout-minutes: ${{ inputs.codex_fallback_enabled && 45 || 25 }}
     outputs:
@@ -1076,12 +1096,26 @@ jobs:
         shell: bash
         env:
           EXPECTED_RUNNER_NAME: ${{ inputs.expected_codex_runner_name }}
+          EXPECTED_RUNNER_NAMES: ${{ inputs.expected_codex_runner_names }}
+          REPOSITORY: ${{ inputs.repository }}
+          CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
         run: |
           set -euo pipefail
           test "${RUNNER_ENVIRONMENT}" = self-hosted
           test "${RUNNER_OS}" = Linux
           test "${RUNNER_ARCH}" = X64
-          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+          if [[ -n "${EXPECTED_RUNNER_NAMES}" ]]; then
+            case ",${EXPECTED_RUNNER_NAMES}," in
+              *,"${RUNNER_NAME}",*) ;;
+              *) echo "::error::Недоверенный runner Codex: ${RUNNER_NAME}"; exit 1 ;;
+            esac
+          else
+            test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+          fi
+          if [[ -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ]]; then
+            test "${REPOSITORY}" != "Abrikosov-group/.github"
+            command -v flock > /dev/null
+          fi
 
       - name: Получить только подготовленный вход ревью
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -1089,13 +1123,39 @@ jobs:
           name: codex-review-input
           path: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}/input
 
+      - name: Проверить метаданные трёх профилей Codex
+        if: inputs.codex_profile_root != ''
+        shell: bash
+        env:
+          CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
+          DIAGNOSTIC_REPORT: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}/codex-account-diagnostic.json
+        run: |
+          set -euo pipefail
+          node "${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}/input/codex-account-diagnostic.mjs" \
+            --profile-root "${CODEX_ACCOUNT_PROFILE_ROOT}" \
+            --report-path "${DIAGNOSTIC_REPORT}" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Сохранить диагностику профилей Codex
+        if: always() && inputs.codex_profile_root != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-account-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review-${{ github.run_id }}-${{ github.run_attempt }}/codex-account-diagnostic.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Проверить Codex CLI и подписочный вход
         shell: bash
+        env:
+          CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
         run: |
           set -euo pipefail
           command -v codex > /dev/null
           codex --version
-          codex login status
+          if [[ -z "${CODEX_ACCOUNT_PROFILE_ROOT}" ]]; then
+            codex login status
+          fi
 
       - name: Повторно проверить PR перед запуском Codex
         shell: bash
@@ -1128,6 +1188,8 @@ jobs:
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
           CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+          CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
+          REVIEW_MODEL: ${{ needs.prepare-codex.outputs.review_model }}
         run: |
           set -euo pipefail
           node "${REVIEW_ROOT}/input/run-codex-review.mjs"

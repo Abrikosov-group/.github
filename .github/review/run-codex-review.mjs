@@ -6,7 +6,47 @@ import { pathToFileURL } from "node:url";
 
 export const PRIMARY_MODEL = "gpt-5.3-codex-spark";
 export const FALLBACK_MODEL = "gpt-5.6-sol";
+export const PROFILE_IDS = ["account-1", "account-2", "account-3"];
+export const PROFILE_LOCK_BUSY_CODE = 75;
+export const DEFAULT_PROFILE_WAIT_MS = 10 * 60_000;
+export const DEFAULT_PROFILE_RETRY_MS = 1_000;
+export const DEFAULT_ATTEMPT_TIMEOUT_MS = 20 * 60_000;
+// The analyze-codex job is capped by workflow timeout-minutes = 45 with fallback
+// enabled and 25 otherwise. The reserve covers checkout, profile diagnostics,
+// artifact upload and cleanup, so the round ends in a controlled way instead of
+// being killed by the job timeout in the middle of an attempt.
+export const FALLBACK_JOB_TIMEOUT_MS = 45 * 60_000;
+export const PRIMARY_JOB_TIMEOUT_MS = 25 * 60_000;
+export const JOB_TIMEOUT_RESERVE_MS = 5 * 60_000;
+export const MIN_SLOT_TIMEOUT_MS = 3 * 60_000;
 const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL]);
+
+export function defaultRoundBudgetMs(fallbackEnabled) {
+  const jobTimeoutMs = fallbackEnabled ? FALLBACK_JOB_TIMEOUT_MS : PRIMARY_JOB_TIMEOUT_MS;
+  return Math.max(0, jobTimeoutMs - JOB_TIMEOUT_RESERVE_MS);
+}
+
+// The current slot may use everything left of the round budget, but every later
+// eligible slot keeps MIN_SLOT_TIMEOUT_MS, so a slow attempt cannot starve the
+// remaining profiles. null means that even the minimum share does not fit anymore:
+// the round must stop in a controlled way instead of exceeding the job timeout.
+export function slotTimeoutMs({ remainingMs, pendingSlots, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS,
+  minSlotMs = MIN_SLOT_TIMEOUT_MS }) {
+  const laterSlots = Math.max(0, Math.trunc(pendingSlots) - 1);
+  const remaining = Math.max(0, remainingMs);
+  const reserve = Math.min(remaining, laterSlots * minSlotMs);
+  const available = remaining - reserve;
+  if (available < minSlotMs) return null;
+  return Math.min(attemptTimeoutMs, available);
+}
+export const CODEX_SLOTS = [
+  { slot: "account-1-spark", profileId: "account-1", model: PRIMARY_MODEL },
+  { slot: "account-1-sol", profileId: "account-1", model: FALLBACK_MODEL },
+  { slot: "account-2-spark", profileId: "account-2", model: PRIMARY_MODEL },
+  { slot: "account-2-sol", profileId: "account-2", model: FALLBACK_MODEL },
+  { slot: "account-3-spark", profileId: "account-3", model: PRIMARY_MODEL },
+  { slot: "account-3-sol", profileId: "account-3", model: FALLBACK_MODEL },
+];
 const SHA = /^[a-f0-9]{40}$/u;
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const MAX_RESULT = 128 * 1024;
@@ -75,14 +115,22 @@ export function attemptDiagnostic({ model, result, report }) {
 
 // Only structured CLI transport errors qualify. Model text, stderr echoes and
 // invalid reports cannot request another model or a second review.
-export function fallbackReason({ code, signal, events, reportPresent, timedOut }) {
+export function fallbackReason({ code, signal, events, reportPresent, timedOut, model = PRIMARY_MODEL }) {
   if (reportPresent || (signal && !timedOut) || (code === 0 && !timedOut)) return null;
   const errors = structuredErrors(events);
-  const modelLimit = e => e.scope === "model" && e.model === PRIMARY_MODEL
+  const modelLimit = e => e.scope === "model" && e.model === model
     && (e.status === 429 || e.code === "model_rate_limit_exceeded");
-  // Access and shared quota failures take precedence over a model-specific one.
-  if (errors.some(e => /authentication|unauthori[sz]ed|invalid.api.key|insufficient.quota|usage.limit|credit|billing/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`)
-    || [401, 403].includes(e.status) || (e.status === 429 && !modelLimit(e)))) return null;
+  const sharedLimit = e => e.scope === "shared" || e.scope === "organization" || e.scope === "project"
+    || e.code === "insufficient_quota";
+  const accountLimit = e => !sharedLimit(e) &&
+    (e.scope === "account" || e.code === "usage_limit_reached"
+      || /account.{0,30}(quota|limit)|(?:quota|usage).{0,30}limit/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`)
+      || (e.status === 429 && !modelLimit(e)));
+  // Authentication and shared quota failures are not repaired by changing account.
+  if (timedOut && errors.some(accountLimit)) return null;
+  if (errors.some(e => /authentication|unauthori[sz]ed|invalid.api.key/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`)
+    || [401, 403].includes(e.status)
+    || (/insufficient.quota|usage.limit|credit|billing/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`) && !accountLimit(e)))) return null;
   // A transient error earlier in the stream does not override the terminal
   // error (for example, an invalid or oversized input after reconnection).
   const lastError = errors.at(-1);
@@ -90,22 +138,28 @@ export function fallbackReason({ code, signal, events, reportPresent, timedOut }
   if (timedOut) return "primary_timeout";
   for (const e of lastError ? [lastError] : []) {
     const message = `${e.code ?? e.type ?? ""} ${e.message ?? ""}`;
-    if (modelLimit(e)) return "primary_model_limit";
-    if (message.includes(PRIMARY_MODEL) && /not supported|not available|does not exist|model.not.found/iu.test(message)) return "primary_model_unavailable";
+    if (accountLimit(e)) return "account_limit";
+    if (modelLimit(e)) return model === PRIMARY_MODEL ? "primary_model_limit" : "model_limit";
+    if (message.includes(model) && /not supported|not available|does not exist|model.not.found/iu.test(message)) {
+      return model === PRIMARY_MODEL ? "primary_model_unavailable" : "model_unavailable";
+    }
     if (/server_error|internal_server_error|service_unavailable|connection_reset|connection_error/iu.test(message)
       || [500, 502, 503, 504].includes(e.status)) return "provider_technical_failure";
   }
   return null;
 }
 
-export function codexInvocation({ model, workDir, schemaPath, resultPath, env = process.env }) {
+export function codexInvocation({ model, profileRoot, profileId, workDir, schemaPath, resultPath, env = process.env }) {
   if (!MODELS.has(model)) throw new Error("Недопустимая модель Codex.");
   const cleanEnv = {};
   for (const key of ["HOME", "PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
     if (env[key]) cleanEnv[key] = env[key];
   }
   cleanEnv.LANG = env.LANG || "C.UTF-8";
-  cleanEnv.CODEX_HOME = env.CODEX_HOME || join(env.HOME, ".codex");
+  const isolatedProfile = profileRoot && profileId ? join(resolve(profileRoot), profileId) : null;
+  cleanEnv.CODEX_HOME = isolatedProfile
+    ? join(isolatedProfile, ".codex")
+    : env.CODEX_HOME || join(env.HOME, ".codex");
   cleanEnv.TMPDIR = env.RUNNER_TEMP;
   const args = ["exec", "--model", model, "-c", 'model_reasoning_effort="xhigh"',
     "-c", 'web_search="disabled"',
@@ -113,15 +167,19 @@ export function codexInvocation({ model, workDir, schemaPath, resultPath, env = 
   for (const feature of ["shell_tool", "apps", "plugins", "browser_use", "computer_use", "image_generation", "multi_agent", "skill_search"]) args.push("--disable", feature);
   if (model === FALLBACK_MODEL) args.push("-c", 'service_tier="default"');
   args.push("--color", "never", "--json", "--cd", workDir, "--output-schema", schemaPath, "--output-last-message", resultPath, "-");
-  return { args, env: cleanEnv };
+  return { args, env: cleanEnv, lockPath: isolatedProfile ? join(isolatedProfile, ".lock") : null };
 }
 
-export async function executeCodex({ model, workDir, schemaPath, resultPath, prompt, signal,
-  binary = "codex", timeoutMs = 20 * 60_000, env = process.env }) {
-  const invocation = codexInvocation({ model, workDir, schemaPath, resultPath, env });
+export async function executeCodex({ model, profileRoot, profileId, workDir, schemaPath, resultPath, prompt, signal,
+  binary = "codex", timeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS, env = process.env }) {
+  const invocation = codexInvocation({ model, profileRoot, profileId, workDir, schemaPath, resultPath, env });
+  const command = invocation.lockPath ? "flock" : binary;
+  const commandArgs = invocation.lockPath
+    ? ["--exclusive", "--nonblock", "--conflict-exit-code", String(PROFILE_LOCK_BUSY_CODE), invocation.lockPath, binary, ...invocation.args]
+    : invocation.args;
   return new Promise((resolveResult, reject) => {
     if (signal.aborted) { reject(new Error("Запуск отменён.")); return; }
-    const child = spawn(binary, invocation.args, { env: invocation.env, cwd: workDir,
+    const child = spawn(command, commandArgs, { env: invocation.env, cwd: workDir,
       detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
     let events = "";
     let stderr = "";
@@ -155,7 +213,8 @@ export async function executeCodex({ model, workDir, schemaPath, resultPath, pro
     child.once("error", error => { cleanup(); reject(error); });
     child.once("close", (code, exitSignal) => {
       cleanup();
-      resolveResult({ code, signal: exitSignal, events, stderr, timedOut, overflow });
+      resolveResult({ code, signal: exitSignal, events, stderr, timedOut, overflow,
+        lockBusy: Boolean(invocation.lockPath && code === PROFILE_LOCK_BUSY_CODE) });
     });
   });
 }
@@ -191,9 +250,14 @@ async function reportAt(path) {
 // A crash leaves it claimed, so recovery cannot silently launch a second fallback.
 // Workflow reruns additionally have fallback disabled by runAttempt != 1.
 export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
-  execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL }) {
+  execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL,
+  profileRoot = null, profileWaitMs = DEFAULT_PROFILE_WAIT_MS,
+  profileRetryMs = DEFAULT_PROFILE_RETRY_MS, sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms)),
+  now = () => Date.now(), roundBudgetMs = null, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS }) {
   validateSnapshot(snapshot);
   if (!MODELS.has(primaryModel)) throw new Error("Недопустимая основная модель.");
+  const budgetMs = roundBudgetMs === null ? defaultRoundBudgetMs(fallbackEnabled)
+    : Math.max(0, Number(roundBudgetMs) || 0);
   root = resolve(root);
   const inputDir = join(root, "input");
   const outputDir = join(root, "output");
@@ -208,7 +272,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   await claim.writeFile(JSON.stringify({ snapshot, inputHash }));
   await claim.close();
   const audit = { version: 2, snapshot, inputHash, status: "claimed", attempts: [],
-    fallbackReserved: false, acceptedModel: null, failure: null };
+    fallbackReserved: false, acceptedModel: null, failure: null, busyProfiles: [], exhaustedProfiles: [] };
   const auditPath = join(outputDir, "round.json");
   const persist = async () => {
     const temp = `${auditPath}.${randomUUID()}`;
@@ -222,15 +286,21 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     await currentPR();
     if (signal.aborted) throw new Error("Раунд отменён.");
   };
-  const attempt = async (model, reason) => {
+  const availableSlots = profileRoot
+    ? (primaryModel === PRIMARY_MODEL
+      ? CODEX_SLOTS
+      : CODEX_SLOTS.filter(slot => slot.model === FALLBACK_MODEL))
+    : [{ slot: primaryModel === PRIMARY_MODEL ? "single-spark" : "single-sol", profileId: null, model: primaryModel },
+      ...(primaryModel === PRIMARY_MODEL ? [{ slot: "single-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
+  const attempt = async ({ model, profileId, slot }, reason, timeoutMs) => {
     await guard();
     const id = randomUUID();
     const dir = join(root, id);
     const workDir = join(dir, "empty-workspace");
     await mkdir(workDir, { recursive: true, mode: 0o700 });
     const resultPath = join(dir, "review.json");
-    const record = { id, model, reasoningEffort: "xhigh", serviceTier: model === FALLBACK_MODEL ? "default" : null, reason,
-      previousId: audit.attempts.at(-1)?.id ?? null, status: "reserved" };
+    const record = { id, slot, profileId, model, reasoningEffort: "xhigh", serviceTier: model === FALLBACK_MODEL ? "default" : null, reason,
+      timeoutMs, previousId: audit.attempts.at(-1)?.id ?? null, status: "reserved" };
     audit.attempts.push(record);
     if (reason) audit.fallbackReserved = true;
     audit.status = "running";
@@ -238,13 +308,19 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     await guard();
     let result;
     try {
-      result = await execute({ model, workDir, schemaPath, resultPath, prompt, signal });
+      result = await execute({ model, profileRoot, profileId, slot, workDir, schemaPath, resultPath, prompt, signal, timeoutMs });
     } catch (error) {
       record.status = "interrupted";
       record.diagnostic = { category: "execution_failed",
         errorCode: LAUNCH_CODES.has(error?.code) ? error.code : null };
       await persist();
       throw error;
+    }
+    if (result.lockBusy) {
+      record.status = "busy";
+      record.diagnostic = { category: "profile_busy", lockBusy: true };
+      await persist();
+      return { accepted: false, reason: null, profileBusy: true };
     }
     record.status = "finished";
     record.exitCode = result.code;
@@ -261,18 +337,74 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
       await persist();
       return { accepted: true, reason: null };
     }
-    const reasonCode = result.overflow ? null : fallbackReason({ ...result, reportPresent: report.present });
+    const reasonCode = result.overflow ? null : fallbackReason({ ...result, model, reportPresent: report.present });
     return { accepted: false, reason: reasonCode };
   };
   await persist();
   try {
-    const primary = await attempt(primaryModel, null);
-    if (primary.accepted) return audit;
-    if (fallbackEnabled && snapshot.runAttempt === 1 && primaryModel !== FALLBACK_MODEL && primary.reason) {
-      const fallback = await attempt(FALLBACK_MODEL, primary.reason);
-      if (fallback.accepted) return audit;
-      audit.failure = "fallback_unavailable";
-    } else audit.failure = primary.reason ?? "no_eligible_report";
+    let previous = null;
+    let previousProfileId = null;
+    const exhaustedProfiles = new Set();
+    // A slot that finished in this round is never launched again, while a slot that
+    // returned lockBusy stays eligible for the next pass. Both wait deadlines are set
+    // once and are not reset by a repeated pass; the round deadline also bounds every
+    // attempt so the job timeout never kills an unfinished round.
+    const completedSlots = new Set();
+    const roundDeadline = now() + budgetMs;
+    const busyDeadline = Math.min(now() + Math.max(0, Number(profileWaitMs) || 0), roundDeadline);
+    let terminalFailure = false;
+    let budgetExhausted = false;
+    let sawBusy = false;
+    while (true) {
+      const busyThisPass = new Set();
+      sawBusy = false;
+      for (const slot of availableSlots) {
+        if (completedSlots.has(slot.slot)) continue;
+        if (slot.profileId && (exhaustedProfiles.has(slot.profileId) || busyThisPass.has(slot.profileId))) continue;
+        if (previous) {
+          if (!previous.reason) { terminalFailure = true; break; }
+          // Account rotation is a change of profile, not of model: only a different
+          // account bypasses the fallback gate. In single-profile mode the next model
+          // of the same profile stays subject to canUseFallback.
+          const accountRotation = previous.reason === "account_limit"
+            && Boolean(slot.profileId) && slot.profileId !== previousProfileId;
+          const canUseFallback = fallbackEnabled && snapshot.runAttempt === 1
+            && (!audit.fallbackReserved || Boolean(profileRoot));
+          if (!accountRotation && !canUseFallback) { terminalFailure = true; break; }
+        }
+        const pendingSlots = availableSlots.filter(candidate =>
+          !completedSlots.has(candidate.slot)
+          && !(candidate.profileId && exhaustedProfiles.has(candidate.profileId))).length;
+        const timeoutMs = slotTimeoutMs({ remainingMs: roundDeadline - now(), pendingSlots, attemptTimeoutMs });
+        if (timeoutMs === null) { budgetExhausted = true; break; }
+        const result = await attempt(slot, previous?.reason ?? null, timeoutMs);
+        if (result.accepted) return audit;
+        if (result.profileBusy) {
+          sawBusy = true;
+          if (slot.profileId) busyThisPass.add(slot.profileId);
+          if (slot.profileId && !audit.busyProfiles.includes(slot.profileId)) audit.busyProfiles.push(slot.profileId);
+          continue;
+        }
+        // A finished slot is closed for this round: a later pass may only recheck
+        // profiles that are still busy, so it cannot reserve a second fallback or
+        // rotation for the same slot.
+        completedSlots.add(slot.slot);
+        previous = result;
+        previousProfileId = slot.profileId ?? null;
+        if (result.reason === "account_limit" && slot.profileId) {
+          exhaustedProfiles.add(slot.profileId);
+          if (!audit.exhaustedProfiles.includes(slot.profileId)) audit.exhaustedProfiles.push(slot.profileId);
+        }
+        if (!result.reason) { terminalFailure = true; break; }
+      }
+      if (budgetExhausted || terminalFailure || !sawBusy || now() >= busyDeadline) break;
+      await sleep(Math.min(Math.max(0, Number(profileRetryMs) || 0), Math.max(0, busyDeadline - now())));
+    }
+    // The actual reason of the last finished attempt wins over generic codes; generic
+    // codes only describe a stop that has no attempt reason behind it.
+    audit.failure = audit.fallbackReserved ? "fallback_unavailable"
+      : (previous?.reason ?? (budgetExhausted ? "round_budget_exhausted"
+        : (sawBusy ? "profile_busy_timeout" : "no_eligible_report")));
     audit.status = "unavailable";
     await persist();
     throw new Error(`Ревью Codex не получено: ${audit.failure}.`);
@@ -292,7 +424,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const snapshot = { repository: process.env.REPOSITORY, pr: process.env.PR_NUMBER,
     base: process.env.BASE_SHA, head: process.env.HEAD_SHA,
     runId: process.env.GITHUB_RUN_ID, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT) };
-  runRound({ root: process.env.REVIEW_ROOT, snapshot, fallbackEnabled: process.env.CODEX_FALLBACK_ENABLED === "true",
+  runRound({ root: process.env.REVIEW_ROOT, snapshot,
+    primaryModel: process.env.REVIEW_MODEL || PRIMARY_MODEL,
+    fallbackEnabled: process.env.CODEX_FALLBACK_ENABLED === "true",
+    profileRoot: process.env.CODEX_ACCOUNT_PROFILE_ROOT || null,
     signal: controller.signal,
     currentPR: async () => {
       const raw = execFileSync("gh", ["api", `repos/${snapshot.repository}/pulls/${snapshot.pr}`],

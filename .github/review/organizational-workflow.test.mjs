@@ -391,13 +391,17 @@ test("организационный workflow запускает только Co
 
 test("Codex использует подписочный Spark xhigh на настраиваемом защищённом Runner", () => {
   const codexJob = extractJob(workflow, "analyze-codex");
-  assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);
+  assert.match(codexJob, /runs-on:\n\s+group: \$\{\{ inputs\.(?:codex_runner_group \|\| inputs\.)?review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.codex_runner_label \}\}/u);
   assert.match(workflow, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_codex_runner_name \}\}/u);
   assert.match(workflow, /codex login status/u);
   assert.match(codexController, /PRIMARY_MODEL = "gpt-5\.3-codex-spark"/u);
   assert.match(codexController, /model_reasoning_effort="xhigh"/u);
   assert.match(codexController, /web_search="disabled"/u);
   assert.match(workflow, /REVIEW_MODEL: \$\{\{ needs\.analyze-codex\.outputs\.review_model \}\}/u);
+  assert.match(workflow, /codex_runner_group:[\s\S]*?default: ""/u);
+  assert.match(workflow, /expected_codex_runner_names:[\s\S]*?default: ""/u);
+  assert.match(workflow, /command -v flock/u);
+  assert.match(workflow, /test "\$\{REPOSITORY\}" != "Abrikosov-group\/\.github"/u);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
   assert.match(
     workflow,
@@ -446,7 +450,7 @@ test("jobs подписочных CLI и оркестрации закрепле
     const job = extractJob(workflow, jobId);
     assert.match(
       job,
-      new RegExp(`runs-on:\\n\\s+group: \\$\\{\\{ inputs\\.review_runner_group \\}\\}\\n\\s+labels: \\$\\{\\{ inputs\\.${labelInput} \\}\\}`, "u"),
+      new RegExp(`runs-on:\\n\\s+group: \\$\\{\\{ inputs\\.(?:codex_runner_group \\|\\| inputs\\.)?review_runner_group \\}\\}\\n\\s+labels: \\$\\{\\{ inputs\\.${labelInput} \\}\\}`, "u"),
     );
     assert.match(job, new RegExp(`steps:\\n\\s+- name: Проверить доверенный Runner ${displayName}`, "u"));
     assert.match(job, new RegExp(`EXPECTED_RUNNER_NAME: \\$\\{\\{ inputs\\.${nameInput} \\}\\}`, "u"));
