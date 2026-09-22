@@ -937,6 +937,17 @@ jobs:
     outputs:
       state: ${{ steps.review.outputs.state }}
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить доверенный контроллер DeepSeek
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -994,6 +1005,17 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить доверенный издатель DeepSeek
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
