@@ -401,13 +401,45 @@ test("Codex использует подписочный Spark xhigh на нас�
   assert.match(workflow, /codex_runner_group:[\s\S]*?default: ""/u);
   assert.match(workflow, /expected_codex_runner_names:[\s\S]*?default: ""/u);
   assert.match(workflow, /command -v flock/u);
-  assert.match(workflow, /test "\$\{REPOSITORY\}" != "Abrikosov-group\/\.github"/u);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY/u);
   assert.match(
     workflow,
     /REVIEW_DISPATCH_TOKEN:\n\s+description: Устаревший совместимый секрет; новое ревью его не использует\n\s+required: false/u,
   );
   assert.doesNotMatch(workflow, /secrets\.REVIEW_DISPATCH_TOKEN/u);
+});
+
+test("пул доступен .github и сохраняет проверку доверенного runner", () => {
+  const trustedRunner = "codex-spark-review-187-127-26-1";
+  const env = {
+    REPOSITORY: "Abrikosov-group/.github",
+    CODEX_ACCOUNT_PROFILE_ROOT: "/var/lib/codex-spark-review/accounts",
+    RUNNER_ENVIRONMENT: "self-hosted",
+    RUNNER_OS: "Linux",
+    RUNNER_ARCH: "X64",
+    RUNNER_NAME: trustedRunner,
+    EXPECTED_RUNNER_NAME: trustedRunner,
+    EXPECTED_RUNNER_NAMES: "",
+  };
+  for (const [overrides, accepted] of [
+    [{}, true],
+    [{ REPOSITORY: "Abrikosov-group/sawabook" }, true],
+    [{ CODEX_ACCOUNT_PROFILE_ROOT: "" }, true],
+    [{ RUNNER_NAME: "codex-spark-review-2" }, false],
+    [{ RUNNER_ENVIRONMENT: "github-hosted" }, false],
+    [{ RUNNER_OS: "Windows" }, false],
+    [{ RUNNER_ARCH: "ARM64" }, false],
+  ]) {
+    const result = executeRunScript({
+      stepName: "Проверить доверенный Runner Codex",
+      env: { ...env, ...overrides },
+      ghMock: "#!/bin/sh\nexit 99\n",
+      commandMocks: { flock: "#!/bin/sh\nexit 99\n" },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status === 0, accepted, JSON.stringify(overrides));
+    assert.equal(result.ghLog, "");
+  }
 });
 
 test("jobs подписочных CLI и оркестрации закреплены за group, label и точным именем", () => {

@@ -1113,7 +1113,6 @@ jobs:
             test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
           fi
           if [[ -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ]]; then
-            test "${REPOSITORY}" != "Abrikosov-group/.github"
             command -v flock > /dev/null
           fi
 
