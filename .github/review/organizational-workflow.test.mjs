@@ -465,7 +465,12 @@ test("DeepSeek изолирован от подписочных ролей и н
   assert.match(workflow, /DEEPSEEK_API_KEY:[\s\S]*?required: false/u);
   assert.match(analyze, /if: inputs.deepseek_enabled && needs.context.outputs.mode == 'all'/u);
   assert.match(analyze, /needs: \[context, start-status, prepare-codex\]/u);
-  assert.match(analyze, /runs-on: ubuntu-24\.04/u);
+  for (const job of [analyze, publish]) {
+    assert.match(job, /runs-on:\n\s+group: \$\{\{ inputs\.review_runner_group \}\}\n\s+labels: \$\{\{ inputs\.orchestration_runner_label \}\}/u);
+    assert.match(job, /steps:\n\s+- name: Проверить доверенный Runner оркестрации/u);
+    assert.match(job, /EXPECTED_RUNNER_NAME: \$\{\{ inputs\.expected_orchestration_runner_name \}\}/u);
+    assert.doesNotMatch(job, /runs-on: (?:ubuntu|windows|macos)-/u);
+  }
   assert.doesNotMatch(analyze, /pull-requests: write|issues: write|contents: write|CLAUDE_CODE_OAUTH_TOKEN/u);
   assert.match(analyze, /ref: \$\{\{ inputs.trusted_workflow_sha \}\}/u);
   assert.doesNotMatch(analyze, /ref:.*head_sha|npm |\.\/pr-head|run-codex-review/u);

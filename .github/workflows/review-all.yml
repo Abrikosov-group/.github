@@ -925,8 +925,11 @@ jobs:
     name: Независимое ревью DeepSeek Flash max
     needs: [context, start-status, prepare-codex]
     if: inputs.deepseek_enabled && needs.context.outputs.mode == 'all'
-    # API-only analysis has no CLI subscription or protected self-hosted runner state.
-    runs-on: ubuntu-24.04
+    # Анализ только через API DeepSeek: без CLI-подписки и без защищённого состояния на runner,
+    # поэтому идёт на orchestration-runner группы ревью, а не на платные runner GitHub.
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -934,6 +937,17 @@ jobs:
     outputs:
       state: ${{ steps.review.outputs.state }}
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить доверенный контроллер DeepSeek
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -983,12 +997,25 @@ jobs:
     name: Опубликовать отдельное ревью DeepSeek
     needs: [context, start-status, analyze-deepseek]
     if: needs.analyze-deepseek.outputs.state == 'completed'
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: ${{ inputs.review_runner_group }}
+      labels: ${{ inputs.orchestration_runner_label }}
     timeout-minutes: 7
     permissions:
       contents: read
       pull-requests: write
     steps:
+      - name: Проверить доверенный Runner оркестрации
+        shell: bash
+        env:
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_orchestration_runner_name }}
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT}" = self-hosted
+          test "${RUNNER_OS}" = Linux
+          test "${RUNNER_ARCH}" = X64
+          test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
       - name: Получить доверенный издатель DeepSeek
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
