@@ -7,6 +7,14 @@ import { pathToFileURL } from "node:url";
 export const PRIMARY_MODEL = "gpt-5.3-codex-spark";
 export const FALLBACK_MODEL = "gpt-5.6-sol";
 const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL]);
+export const CODEX_SLOTS = [
+  { slot: "codex-1-spark", profileId: "codex-1", model: PRIMARY_MODEL },
+  { slot: "codex-1-sol", profileId: "codex-1", model: FALLBACK_MODEL },
+  { slot: "codex-2-spark", profileId: "codex-2", model: PRIMARY_MODEL },
+  { slot: "codex-2-sol", profileId: "codex-2", model: FALLBACK_MODEL },
+  { slot: "codex-3-spark", profileId: "codex-3", model: PRIMARY_MODEL },
+  { slot: "codex-3-sol", profileId: "codex-3", model: FALLBACK_MODEL },
+];
 const SHA = /^[a-f0-9]{40}$/u;
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const MAX_RESULT = 128 * 1024;
@@ -75,14 +83,22 @@ export function attemptDiagnostic({ model, result, report }) {
 
 // Only structured CLI transport errors qualify. Model text, stderr echoes and
 // invalid reports cannot request another model or a second review.
-export function fallbackReason({ code, signal, events, reportPresent, timedOut }) {
+export function fallbackReason({ code, signal, events, reportPresent, timedOut, model = PRIMARY_MODEL }) {
   if (reportPresent || (signal && !timedOut) || (code === 0 && !timedOut)) return null;
   const errors = structuredErrors(events);
-  const modelLimit = e => e.scope === "model" && e.model === PRIMARY_MODEL
+  const modelLimit = e => e.scope === "model" && e.model === model
     && (e.status === 429 || e.code === "model_rate_limit_exceeded");
-  // Access and shared quota failures take precedence over a model-specific one.
-  if (errors.some(e => /authentication|unauthori[sz]ed|invalid.api.key|insufficient.quota|usage.limit|credit|billing/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`)
-    || [401, 403].includes(e.status) || (e.status === 429 && !modelLimit(e)))) return null;
+  const sharedLimit = e => e.scope === "shared" || e.scope === "organization" || e.scope === "project"
+    || e.code === "insufficient_quota";
+  const accountLimit = e => !sharedLimit(e) &&
+    (e.scope === "account" || e.code === "usage_limit_reached"
+      || /account.{0,30}(quota|limit)|(?:quota|usage).{0,30}limit/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`)
+      || (e.status === 429 && !modelLimit(e)));
+  // Authentication and shared quota failures are not repaired by changing account.
+  if (timedOut && errors.some(accountLimit)) return null;
+  if (errors.some(e => /authentication|unauthori[sz]ed|invalid.api.key/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`)
+    || [401, 403].includes(e.status)
+    || (/insufficient.quota|usage.limit|credit|billing/iu.test(`${e.code ?? e.type ?? ""} ${e.message ?? ""}`) && !accountLimit(e)))) return null;
   // A transient error earlier in the stream does not override the terminal
   // error (for example, an invalid or oversized input after reconnection).
   const lastError = errors.at(-1);
@@ -90,22 +106,27 @@ export function fallbackReason({ code, signal, events, reportPresent, timedOut }
   if (timedOut) return "primary_timeout";
   for (const e of lastError ? [lastError] : []) {
     const message = `${e.code ?? e.type ?? ""} ${e.message ?? ""}`;
-    if (modelLimit(e)) return "primary_model_limit";
-    if (message.includes(PRIMARY_MODEL) && /not supported|not available|does not exist|model.not.found/iu.test(message)) return "primary_model_unavailable";
+    if (accountLimit(e)) return "account_limit";
+    if (modelLimit(e)) return model === PRIMARY_MODEL ? "primary_model_limit" : "model_limit";
+    if (message.includes(model) && /not supported|not available|does not exist|model.not.found/iu.test(message)) {
+      return model === PRIMARY_MODEL ? "primary_model_unavailable" : "model_unavailable";
+    }
     if (/server_error|internal_server_error|service_unavailable|connection_reset|connection_error/iu.test(message)
       || [500, 502, 503, 504].includes(e.status)) return "provider_technical_failure";
   }
   return null;
 }
 
-export function codexInvocation({ model, workDir, schemaPath, resultPath, env = process.env }) {
+export function codexInvocation({ model, profileRoot, profileId, workDir, schemaPath, resultPath, env = process.env }) {
   if (!MODELS.has(model)) throw new Error("Недопустимая модель Codex.");
   const cleanEnv = {};
   for (const key of ["HOME", "PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
     if (env[key]) cleanEnv[key] = env[key];
   }
   cleanEnv.LANG = env.LANG || "C.UTF-8";
-  cleanEnv.CODEX_HOME = env.CODEX_HOME || join(env.HOME, ".codex");
+  cleanEnv.CODEX_HOME = profileRoot && profileId
+    ? join(profileRoot, profileId, ".codex")
+    : env.CODEX_HOME || join(env.HOME, ".codex");
   cleanEnv.TMPDIR = env.RUNNER_TEMP;
   const args = ["exec", "--model", model, "-c", 'model_reasoning_effort="xhigh"',
     "-c", 'web_search="disabled"',
@@ -116,9 +137,9 @@ export function codexInvocation({ model, workDir, schemaPath, resultPath, env = 
   return { args, env: cleanEnv };
 }
 
-export async function executeCodex({ model, workDir, schemaPath, resultPath, prompt, signal,
+export async function executeCodex({ model, profileRoot, profileId, workDir, schemaPath, resultPath, prompt, signal,
   binary = "codex", timeoutMs = 20 * 60_000, env = process.env }) {
-  const invocation = codexInvocation({ model, workDir, schemaPath, resultPath, env });
+  const invocation = codexInvocation({ model, profileRoot, profileId, workDir, schemaPath, resultPath, env });
   return new Promise((resolveResult, reject) => {
     if (signal.aborted) { reject(new Error("Запуск отменён.")); return; }
     const child = spawn(binary, invocation.args, { env: invocation.env, cwd: workDir,
@@ -191,7 +212,8 @@ async function reportAt(path) {
 // A crash leaves it claimed, so recovery cannot silently launch a second fallback.
 // Workflow reruns additionally have fallback disabled by runAttempt != 1.
 export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
-  execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL }) {
+  execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL,
+  profileRoot = null }) {
   validateSnapshot(snapshot);
   if (!MODELS.has(primaryModel)) throw new Error("Недопустимая основная модель.");
   root = resolve(root);
@@ -222,14 +244,20 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     await currentPR();
     if (signal.aborted) throw new Error("Раунд отменён.");
   };
-  const attempt = async (model, reason) => {
+  const availableSlots = profileRoot
+    ? (primaryModel === PRIMARY_MODEL
+      ? CODEX_SLOTS
+      : CODEX_SLOTS.filter(slot => slot.model === FALLBACK_MODEL))
+    : [{ slot: primaryModel === PRIMARY_MODEL ? "codex-1-spark" : "codex-1-sol", profileId: null, model: primaryModel },
+      ...(primaryModel === PRIMARY_MODEL ? [{ slot: "codex-1-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
+  const attempt = async ({ model, profileId, slot }, reason) => {
     await guard();
     const id = randomUUID();
     const dir = join(root, id);
     const workDir = join(dir, "empty-workspace");
     await mkdir(workDir, { recursive: true, mode: 0o700 });
     const resultPath = join(dir, "review.json");
-    const record = { id, model, reasoningEffort: "xhigh", serviceTier: model === FALLBACK_MODEL ? "default" : null, reason,
+    const record = { id, slot, profileId, model, reasoningEffort: "xhigh", serviceTier: model === FALLBACK_MODEL ? "default" : null, reason,
       previousId: audit.attempts.at(-1)?.id ?? null, status: "reserved" };
     audit.attempts.push(record);
     if (reason) audit.fallbackReserved = true;
@@ -238,7 +266,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     await guard();
     let result;
     try {
-      result = await execute({ model, workDir, schemaPath, resultPath, prompt, signal });
+      result = await execute({ model, profileRoot, profileId, slot, workDir, schemaPath, resultPath, prompt, signal });
     } catch (error) {
       record.status = "interrupted";
       record.diagnostic = { category: "execution_failed",
@@ -261,18 +289,22 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
       await persist();
       return { accepted: true, reason: null };
     }
-    const reasonCode = result.overflow ? null : fallbackReason({ ...result, reportPresent: report.present });
+    const reasonCode = result.overflow ? null : fallbackReason({ ...result, model, reportPresent: report.present });
     return { accepted: false, reason: reasonCode };
   };
   await persist();
   try {
-    const primary = await attempt(primaryModel, null);
-    if (primary.accepted) return audit;
-    if (fallbackEnabled && snapshot.runAttempt === 1 && primaryModel !== FALLBACK_MODEL && primary.reason) {
-      const fallback = await attempt(FALLBACK_MODEL, primary.reason);
-      if (fallback.accepted) return audit;
-      audit.failure = "fallback_unavailable";
-    } else audit.failure = primary.reason ?? "no_eligible_report";
+    let previous = null;
+    let exhaustedProfile = null;
+    for (const slot of availableSlots) {
+      if (previous && (!fallbackEnabled || snapshot.runAttempt !== 1 || !previous.reason)) break;
+      if (slot.profileId && slot.profileId === exhaustedProfile) continue;
+      const result = await attempt(slot, previous?.reason ?? null);
+      if (result.accepted) return audit;
+      previous = result;
+      if (result.reason === "account_limit") exhaustedProfile = slot.profileId;
+    }
+    audit.failure = audit.fallbackReserved ? "fallback_unavailable" : "no_eligible_report";
     audit.status = "unavailable";
     await persist();
     throw new Error(`Ревью Codex не получено: ${audit.failure}.`);
@@ -295,6 +327,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   runRound({ root: process.env.REVIEW_ROOT, snapshot,
     primaryModel: process.env.REVIEW_MODEL || PRIMARY_MODEL,
     fallbackEnabled: process.env.CODEX_FALLBACK_ENABLED === "true",
+    profileRoot: process.env.CODEX_ACCOUNT_PROFILE_ROOT || null,
     signal: controller.signal,
     currentPR: async () => {
       const raw = execFileSync("gh", ["api", `repos/${snapshot.repository}/pulls/${snapshot.pr}`],

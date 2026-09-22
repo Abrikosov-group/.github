@@ -5,10 +5,10 @@ export const DIAGNOSTIC_PROTOCOL_VERSION = "1";
 export const PROFILE_IDS = ["codex-1", "codex-2", "codex-3"];
 export const SLOTS = [
   { id: "codex-1-spark", profileId: "codex-1", model: "gpt-5.3-codex-spark" },
-  { id: "codex-2-spark", profileId: "codex-2", model: "gpt-5.3-codex-spark" },
-  { id: "codex-3-spark", profileId: "codex-3", model: "gpt-5.3-codex-spark" },
   { id: "codex-1-sol", profileId: "codex-1", model: "gpt-5.6-sol" },
+  { id: "codex-2-spark", profileId: "codex-2", model: "gpt-5.3-codex-spark" },
   { id: "codex-2-sol", profileId: "codex-2", model: "gpt-5.6-sol" },
+  { id: "codex-3-spark", profileId: "codex-3", model: "gpt-5.3-codex-spark" },
   { id: "codex-3-sol", profileId: "codex-3", model: "gpt-5.6-sol" },
 ];
 
