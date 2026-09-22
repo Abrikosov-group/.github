@@ -135,13 +135,13 @@ jobs:
     name: Повторить ИИ-ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@a3de9225e21b82b351404042c2fdf9b56e068f2f
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 86f26d64bb986b0c1982c88690ce0178e68c74ed
+      trusted_workflow_sha: a3de9225e21b82b351404042c2fdf9b56e068f2f
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
@@ -149,10 +149,12 @@ jobs:
       manual_base_refs: "*"
       review_runner_group: sawabook-review
       orchestration_runner_label: sawabook-review-orchestration
-      codex_runner_label: sawabook-review-codex
+      codex_runner_label: codex-spark-review
+      codex_runner_group: codex-spark-review
+      codex_profile_root: /var/lib/codex-spark-review/accounts
       claude_runner_label: sawabook-review-claude
       expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
-      expected_codex_runner_name: sawabook-review-codex-179-198-117-215
+      expected_codex_runner_name: codex-spark-review-187-127-26-1
       expected_claude_runner_name: sawabook-review-claude-179-198-117-215
       codex_fallback_enabled: true
       deepseek_enabled: true
@@ -249,23 +251,25 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@86f26d64bb986b0c1982c88690ce0178e68c74ed
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@a3de9225e21b82b351404042c2fdf9b56e068f2f
     with:
       trigger: automatic
       command: /review-all
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
-      trusted_workflow_sha: 86f26d64bb986b0c1982c88690ce0178e68c74ed
+      trusted_workflow_sha: a3de9225e21b82b351404042c2fdf9b56e068f2f
       pr_number: ${{ github.event.pull_request.number }}
       expected_head_sha: ${{ github.event.pull_request.head.sha }}
       automatic_base_refs: main
       manual_base_refs: "*"
       review_runner_group: sawabook-review
       orchestration_runner_label: sawabook-review-orchestration
-      codex_runner_label: sawabook-review-codex
+      codex_runner_label: codex-spark-review
+      codex_runner_group: codex-spark-review
+      codex_profile_root: /var/lib/codex-spark-review/accounts
       claude_runner_label: sawabook-review-claude
       expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215
-      expected_codex_runner_name: sawabook-review-codex-179-198-117-215
+      expected_codex_runner_name: codex-spark-review-187-127-26-1
       expected_claude_runner_name: sawabook-review-claude-179-198-117-215
       codex_fallback_enabled: true
       deepseek_enabled: true

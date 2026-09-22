@@ -19,7 +19,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
-const organizationWorkflowSha = "86f26d64bb986b0c1982c88690ce0178e68c74ed";
+const organizationWorkflowSha = "a3de9225e21b82b351404042c2fdf9b56e068f2f";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -593,10 +593,12 @@ test("центральный caller передаёт полный контрак
     'manual_base_refs: "*"',
     "review_runner_group: sawabook-review",
     "orchestration_runner_label: sawabook-review-orchestration",
-    "codex_runner_label: sawabook-review-codex",
+    "codex_runner_label: codex-spark-review",
+    "codex_runner_group: codex-spark-review",
+    "codex_profile_root: /var/lib/codex-spark-review/accounts",
     "claude_runner_label: sawabook-review-claude",
     "expected_orchestration_runner_name: sawabook-review-orchestration-179-198-117-215",
-    "expected_codex_runner_name: sawabook-review-codex-179-198-117-215",
+    "expected_codex_runner_name: codex-spark-review-187-127-26-1",
     "expected_claude_runner_name: sawabook-review-claude-179-198-117-215",
     "trusted_workflow_repository: Abrikosov-group/.github",
     `trusted_workflow_sha: ${organizationWorkflowSha}`,
@@ -610,6 +612,7 @@ test("центральный caller передаёт полный контрак
     for (const input of expectedInputs) {
       assert.ok(job.includes(`      ${input}`), `${jobId}: отсутствует ${input}`);
     }
+    assert.doesNotMatch(job, /expected_codex_runner_names:/u);
     assert.ok(job.includes('      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}'));
   }
 
