@@ -224,7 +224,8 @@ async function reportAt(path) {
 export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL,
   profileRoot = null, profileWaitMs = DEFAULT_PROFILE_WAIT_MS,
-  profileRetryMs = DEFAULT_PROFILE_RETRY_MS, sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms)) }) {
+  profileRetryMs = DEFAULT_PROFILE_RETRY_MS, sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms)),
+  now = () => Date.now() }) {
   validateSnapshot(snapshot);
   if (!MODELS.has(primaryModel)) throw new Error("Недопустимая основная модель.");
   root = resolve(root);
@@ -313,13 +314,18 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   try {
     let previous = null;
     const exhaustedProfiles = new Set();
-    const deadline = Date.now() + Math.max(0, Number(profileWaitMs) || 0);
+    // A slot that finished in this round is never launched again, while a slot that
+    // returned lockBusy stays eligible for the next pass. The wait deadline is set
+    // once and is not reset by a repeated pass.
+    const completedSlots = new Set();
+    const deadline = now() + Math.max(0, Number(profileWaitMs) || 0);
     let terminalFailure = false;
     let sawBusy = false;
     while (true) {
       const busyThisPass = new Set();
       sawBusy = false;
       for (const slot of availableSlots) {
+        if (completedSlots.has(slot.slot)) continue;
         if (slot.profileId && (exhaustedProfiles.has(slot.profileId) || busyThisPass.has(slot.profileId))) continue;
         if (previous) {
           if (!previous.reason) { terminalFailure = true; break; }
@@ -336,6 +342,10 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
           if (slot.profileId && !audit.busyProfiles.includes(slot.profileId)) audit.busyProfiles.push(slot.profileId);
           continue;
         }
+        // A finished slot is closed for this round: a later pass may only recheck
+        // profiles that are still busy, so it cannot reserve a second fallback or
+        // rotation for the same slot.
+        completedSlots.add(slot.slot);
         previous = result;
         if (result.reason === "account_limit" && slot.profileId) {
           exhaustedProfiles.add(slot.profileId);
@@ -343,8 +353,8 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
         }
         if (!result.reason) { terminalFailure = true; break; }
       }
-      if (terminalFailure || !sawBusy || Date.now() >= deadline) break;
-      await sleep(Math.min(Math.max(0, Number(profileRetryMs) || 0), Math.max(0, deadline - Date.now())));
+      if (terminalFailure || !sawBusy || now() >= deadline) break;
+      await sleep(Math.min(Math.max(0, Number(profileRetryMs) || 0), Math.max(0, deadline - now())));
     }
     audit.failure = audit.fallbackReserved ? "fallback_unavailable"
       : (sawBusy ? "profile_busy_timeout" : (previous?.reason ?? "no_eligible_report"));
