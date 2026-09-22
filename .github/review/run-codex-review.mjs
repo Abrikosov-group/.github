@@ -10,7 +10,35 @@ export const PROFILE_IDS = ["account-1", "account-2", "account-3"];
 export const PROFILE_LOCK_BUSY_CODE = 75;
 export const DEFAULT_PROFILE_WAIT_MS = 10 * 60_000;
 export const DEFAULT_PROFILE_RETRY_MS = 1_000;
+export const DEFAULT_ATTEMPT_TIMEOUT_MS = 20 * 60_000;
+// The analyze-codex job is capped by workflow timeout-minutes = 45 with fallback
+// enabled and 25 otherwise. The reserve covers checkout, profile diagnostics,
+// artifact upload and cleanup, so the round ends in a controlled way instead of
+// being killed by the job timeout in the middle of an attempt.
+export const FALLBACK_JOB_TIMEOUT_MS = 45 * 60_000;
+export const PRIMARY_JOB_TIMEOUT_MS = 25 * 60_000;
+export const JOB_TIMEOUT_RESERVE_MS = 5 * 60_000;
+export const MIN_SLOT_TIMEOUT_MS = 3 * 60_000;
 const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL]);
+
+export function defaultRoundBudgetMs(fallbackEnabled) {
+  const jobTimeoutMs = fallbackEnabled ? FALLBACK_JOB_TIMEOUT_MS : PRIMARY_JOB_TIMEOUT_MS;
+  return Math.max(0, jobTimeoutMs - JOB_TIMEOUT_RESERVE_MS);
+}
+
+// The current slot may use everything left of the round budget, but every later
+// eligible slot keeps MIN_SLOT_TIMEOUT_MS, so a slow attempt cannot starve the
+// remaining profiles. null means that even the minimum share does not fit anymore:
+// the round must stop in a controlled way instead of exceeding the job timeout.
+export function slotTimeoutMs({ remainingMs, pendingSlots, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS,
+  minSlotMs = MIN_SLOT_TIMEOUT_MS }) {
+  const laterSlots = Math.max(0, Math.trunc(pendingSlots) - 1);
+  const remaining = Math.max(0, remainingMs);
+  const reserve = Math.min(remaining, laterSlots * minSlotMs);
+  const available = remaining - reserve;
+  if (available < minSlotMs) return null;
+  return Math.min(attemptTimeoutMs, available);
+}
 export const CODEX_SLOTS = [
   { slot: "account-1-spark", profileId: "account-1", model: PRIMARY_MODEL },
   { slot: "account-1-sol", profileId: "account-1", model: FALLBACK_MODEL },
@@ -143,7 +171,7 @@ export function codexInvocation({ model, profileRoot, profileId, workDir, schema
 }
 
 export async function executeCodex({ model, profileRoot, profileId, workDir, schemaPath, resultPath, prompt, signal,
-  binary = "codex", timeoutMs = 20 * 60_000, env = process.env }) {
+  binary = "codex", timeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS, env = process.env }) {
   const invocation = codexInvocation({ model, profileRoot, profileId, workDir, schemaPath, resultPath, env });
   const command = invocation.lockPath ? "flock" : binary;
   const commandArgs = invocation.lockPath
@@ -225,9 +253,11 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   execute = executeCodex, signal = new AbortController().signal, primaryModel = PRIMARY_MODEL,
   profileRoot = null, profileWaitMs = DEFAULT_PROFILE_WAIT_MS,
   profileRetryMs = DEFAULT_PROFILE_RETRY_MS, sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms)),
-  now = () => Date.now() }) {
+  now = () => Date.now(), roundBudgetMs = null, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS }) {
   validateSnapshot(snapshot);
   if (!MODELS.has(primaryModel)) throw new Error("Недопустимая основная модель.");
+  const budgetMs = roundBudgetMs === null ? defaultRoundBudgetMs(fallbackEnabled)
+    : Math.max(0, Number(roundBudgetMs) || 0);
   root = resolve(root);
   const inputDir = join(root, "input");
   const outputDir = join(root, "output");
@@ -262,7 +292,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
       : CODEX_SLOTS.filter(slot => slot.model === FALLBACK_MODEL))
     : [{ slot: primaryModel === PRIMARY_MODEL ? "single-spark" : "single-sol", profileId: null, model: primaryModel },
       ...(primaryModel === PRIMARY_MODEL ? [{ slot: "single-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
-  const attempt = async ({ model, profileId, slot }, reason) => {
+  const attempt = async ({ model, profileId, slot }, reason, timeoutMs) => {
     await guard();
     const id = randomUUID();
     const dir = join(root, id);
@@ -270,7 +300,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     await mkdir(workDir, { recursive: true, mode: 0o700 });
     const resultPath = join(dir, "review.json");
     const record = { id, slot, profileId, model, reasoningEffort: "xhigh", serviceTier: model === FALLBACK_MODEL ? "default" : null, reason,
-      previousId: audit.attempts.at(-1)?.id ?? null, status: "reserved" };
+      timeoutMs, previousId: audit.attempts.at(-1)?.id ?? null, status: "reserved" };
     audit.attempts.push(record);
     if (reason) audit.fallbackReserved = true;
     audit.status = "running";
@@ -278,7 +308,7 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     await guard();
     let result;
     try {
-      result = await execute({ model, profileRoot, profileId, slot, workDir, schemaPath, resultPath, prompt, signal });
+      result = await execute({ model, profileRoot, profileId, slot, workDir, schemaPath, resultPath, prompt, signal, timeoutMs });
     } catch (error) {
       record.status = "interrupted";
       record.diagnostic = { category: "execution_failed",
@@ -313,13 +343,17 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   await persist();
   try {
     let previous = null;
+    let previousProfileId = null;
     const exhaustedProfiles = new Set();
     // A slot that finished in this round is never launched again, while a slot that
-    // returned lockBusy stays eligible for the next pass. The wait deadline is set
-    // once and is not reset by a repeated pass.
+    // returned lockBusy stays eligible for the next pass. Both wait deadlines are set
+    // once and are not reset by a repeated pass; the round deadline also bounds every
+    // attempt so the job timeout never kills an unfinished round.
     const completedSlots = new Set();
-    const deadline = now() + Math.max(0, Number(profileWaitMs) || 0);
+    const roundDeadline = now() + budgetMs;
+    const busyDeadline = Math.min(now() + Math.max(0, Number(profileWaitMs) || 0), roundDeadline);
     let terminalFailure = false;
+    let budgetExhausted = false;
     let sawBusy = false;
     while (true) {
       const busyThisPass = new Set();
@@ -329,12 +363,21 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
         if (slot.profileId && (exhaustedProfiles.has(slot.profileId) || busyThisPass.has(slot.profileId))) continue;
         if (previous) {
           if (!previous.reason) { terminalFailure = true; break; }
-          const accountRotation = previous.reason === "account_limit";
+          // Account rotation is a change of profile, not of model: only a different
+          // account bypasses the fallback gate. In single-profile mode the next model
+          // of the same profile stays subject to canUseFallback.
+          const accountRotation = previous.reason === "account_limit"
+            && Boolean(slot.profileId) && slot.profileId !== previousProfileId;
           const canUseFallback = fallbackEnabled && snapshot.runAttempt === 1
             && (!audit.fallbackReserved || Boolean(profileRoot));
           if (!accountRotation && !canUseFallback) { terminalFailure = true; break; }
         }
-        const result = await attempt(slot, previous?.reason ?? null);
+        const pendingSlots = availableSlots.filter(candidate =>
+          !completedSlots.has(candidate.slot)
+          && !(candidate.profileId && exhaustedProfiles.has(candidate.profileId))).length;
+        const timeoutMs = slotTimeoutMs({ remainingMs: roundDeadline - now(), pendingSlots, attemptTimeoutMs });
+        if (timeoutMs === null) { budgetExhausted = true; break; }
+        const result = await attempt(slot, previous?.reason ?? null, timeoutMs);
         if (result.accepted) return audit;
         if (result.profileBusy) {
           sawBusy = true;
@@ -347,17 +390,21 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
         // rotation for the same slot.
         completedSlots.add(slot.slot);
         previous = result;
+        previousProfileId = slot.profileId ?? null;
         if (result.reason === "account_limit" && slot.profileId) {
           exhaustedProfiles.add(slot.profileId);
           if (!audit.exhaustedProfiles.includes(slot.profileId)) audit.exhaustedProfiles.push(slot.profileId);
         }
         if (!result.reason) { terminalFailure = true; break; }
       }
-      if (terminalFailure || !sawBusy || now() >= deadline) break;
-      await sleep(Math.min(Math.max(0, Number(profileRetryMs) || 0), Math.max(0, deadline - now())));
+      if (budgetExhausted || terminalFailure || !sawBusy || now() >= busyDeadline) break;
+      await sleep(Math.min(Math.max(0, Number(profileRetryMs) || 0), Math.max(0, busyDeadline - now())));
     }
+    // The actual reason of the last finished attempt wins over generic codes; generic
+    // codes only describe a stop that has no attempt reason behind it.
     audit.failure = audit.fallbackReserved ? "fallback_unavailable"
-      : (sawBusy ? "profile_busy_timeout" : (previous?.reason ?? "no_eligible_report"));
+      : (previous?.reason ?? (budgetExhausted ? "round_budget_exhausted"
+        : (sawBusy ? "profile_busy_timeout" : "no_eligible_report")));
     audit.status = "unavailable";
     await persist();
     throw new Error(`Ревью Codex не получено: ${audit.failure}.`);

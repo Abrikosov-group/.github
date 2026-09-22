@@ -5,8 +5,9 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertCurrentPR, attemptDiagnostic, codexInvocation, executeCodex, fallbackReason, runRound,
-  PRIMARY_MODEL, FALLBACK_MODEL, PROFILE_LOCK_BUSY_CODE } from "./run-codex-review.mjs";
+import { assertCurrentPR, attemptDiagnostic, codexInvocation, defaultRoundBudgetMs, executeCodex, fallbackReason, runRound,
+  slotTimeoutMs, DEFAULT_ATTEMPT_TIMEOUT_MS, FALLBACK_JOB_TIMEOUT_MS, JOB_TIMEOUT_RESERVE_MS, MIN_SLOT_TIMEOUT_MS,
+  PRIMARY_JOB_TIMEOUT_MS, PRIMARY_MODEL, FALLBACK_MODEL, PROFILE_LOCK_BUSY_CODE } from "./run-codex-review.mjs";
 
 const snapshot = { repository: "example/repo", pr: 1, base: "a".repeat(40), head: "b".repeat(40), runId: "12", runAttempt: 1 };
 const unavailable = { code: 1, events: JSON.stringify({ type: "error", message: `The '${PRIMARY_MODEL}' model is not supported when using Codex with a ChatGPT account.` }) };
@@ -35,13 +36,15 @@ const accountLimit = { code: 1, events: JSON.stringify({ type: "error", status: 
 const unauthorized = { code: 1, events: JSON.stringify({ type: "error", status: 401, message: "Unauthorized" }) };
 
 // Управляемое время: многопроходные проверки не ждут реальные минуты и подтверждают,
-// что новый проход не обнуляет срок ожидания занятых профилей.
+// что новый проход не обнуляет срок ожидания занятых профилей, а бюджет раунда
+// расходуется попытками последовательно.
 function clock(sleepLimit = 20) {
   let time = 0;
   const waits = [];
   return {
     now: () => time,
     waits: () => waits,
+    advance: ms => { time += ms; },
     sleep: async ms => {
       if (waits.length >= sleepLimit) throw new Error("Цикл ожидания профилей не ограничен сроком.");
       waits.push(ms);
@@ -199,6 +202,87 @@ test("a primary transport reason is preserved when fallback is disabled", async 
     return { code: 1, events: JSON.stringify({ type: "error", status: 503, code: "service_unavailable" }) };
   } }));
   assert.equal((await h.audit()).failure, "provider_technical_failure");
+});
+
+// P2: остановка после первой попытки в одиночном режиме не подменяет фактическую
+// причину общим кодом no_eligible_report — ни при выключенном fallback, ни на повторе.
+test("single-profile stop keeps the actual failure reason", async t => {
+  const modelLimit = { code: 1, events: JSON.stringify({ type: "error", status: 429, scope: "model",
+    model: PRIMARY_MODEL, code: "model_rate_limit_exceeded" }) };
+  const cases = [
+    [{ fallbackEnabled: false }, "primary_timeout", { code: 0, signal: null, timedOut: true, events: "" }],
+    [{ snapshot: { ...snapshot, runAttempt: 2 } }, "primary_model_limit", modelLimit],
+    [{ fallbackEnabled: false }, "provider_technical_failure", technical],
+  ];
+  for (const [options, reason, result] of cases) {
+    const h = await harness(t);
+    await assert.rejects(runRound({ ...h.options, ...options, execute: async request => {
+      h.calls.push(request);
+      return result;
+    } }), new RegExp(`Ревью Codex не получено: ${reason}`, "u"));
+    const audit = await h.audit();
+    assert.deepEqual(h.calls.map(call => call.slot), ["single-spark"], reason);
+    assert.equal(audit.failure, reason);
+    assert.equal(audit.fallbackReserved, false);
+    assert.equal(audit.acceptedModel, null);
+  }
+});
+
+// P2: account_limit открывает только переход на другой профиль. Следующая модель
+// того же (единственного) профиля по-прежнему подчиняется canUseFallback.
+test("single-profile account_limit does not bypass a disabled fallback or a rerun", async t => {
+  for (const options of [{ fallbackEnabled: false }, { snapshot: { ...snapshot, runAttempt: 2 } }]) {
+    const h = await harness(t);
+    await assert.rejects(runRound({ ...h.options, ...options, execute: async request => {
+      h.calls.push(request);
+      return accountLimit;
+    } }), /Ревью Codex не получено/u);
+    const audit = await h.audit();
+    assert.deepEqual(h.calls.map(call => call.slot), ["single-spark"]);
+    assert.equal(audit.failure, "account_limit");
+    assert.equal(audit.fallbackReserved, false);
+    assert.equal(audit.attempts.length, 1);
+  }
+});
+
+test("single-profile account_limit still reaches Sol when fallback is eligible", async t => {
+  const h = await harness(t);
+  const audit = await runRound({ ...h.options, execute: async request => {
+    if (request.slot === "single-spark") { h.calls.push(request); return accountLimit; }
+    return h.success(request);
+  } });
+  assert.deepEqual(h.calls.map(call => call.slot), ["single-spark", "single-sol"]);
+  assert.equal(audit.acceptedModel, FALLBACK_MODEL);
+  assert.equal(audit.fallbackReserved, true);
+});
+
+test("rotation across configured profiles does not depend on the fallback gate", async t => {
+  for (const options of [{ fallbackEnabled: false }, { snapshot: { ...snapshot, runAttempt: 2 } }]) {
+    const h = await harness(t);
+    await assert.rejects(runRound({ ...h.options, ...options, profileRoot: "/profiles", execute: async request => {
+      h.calls.push(request);
+      return accountLimit;
+    } }), /Ревью Codex не получено/u);
+    assert.deepEqual(h.calls.map(call => call.slot), ["account-1-spark", "account-2-spark", "account-3-spark"]);
+    assert.deepEqual((await h.audit()).exhaustedProfiles, ["account-1", "account-2", "account-3"]);
+  }
+});
+
+// P2: занятый профиль не должен маскировать фактическую причину завершённого слота.
+test("a busy profile does not mask the technical reason of a finished slot", async t => {
+  const h = await harness(t);
+  const time = clock();
+  await assert.rejects(runRound({ ...h.options, fallbackEnabled: false, profileRoot: "/profiles",
+    profileWaitMs: 2_000, profileRetryMs: 1_000, now: time.now, sleep: time.sleep,
+    execute: async request => {
+      h.calls.push(request);
+      return request.slot === "account-2-spark" ? technical : busy;
+    } }), /provider_technical_failure/u);
+  const audit = await h.audit();
+  assert.deepEqual(h.calls.map(call => call.slot), ["account-1-spark", "account-2-spark"]);
+  assert.equal(audit.failure, "provider_technical_failure");
+  assert.equal(audit.fallbackReserved, false);
+  assert.deepEqual(time.waits(), []);
 });
 
 test("a report rejected by schema is not a technical failure, including nonzero CLI exit", async t => {
@@ -830,7 +914,7 @@ test("T7 отключённый fallback и повторный запуск ос
   }
 });
 
-test("T7 известный P2 про account_limit остаётся открытым и не даёт повторов", async t => {
+test("T7 account_limit ротирует профили и не даёт повторов слотов", async t => {
   const h = await harness(t);
   await assert.rejects(runRound({ ...h.options, profileRoot: "/profiles", execute: async request => {
     h.calls.push(request);
@@ -841,5 +925,84 @@ test("T7 известный P2 про account_limit остаётся откры�
   assertSlotAuditOrder(audit);
   assert.deepEqual(audit.exhaustedProfiles, ["account-1", "account-2", "account-3"]);
   assert.equal(audit.status, "unavailable");
+  assert.equal(audit.acceptedModel, null);
+});
+
+// P2: бюджет раунда согласован с timeout-minutes задания analyze-codex. Значения
+// 45/25 минут берутся из workflow, поэтому тест падает при расхождении контракта.
+test("round budget matches the analyze-codex job timeout", async () => {
+  const workflow = await readFile(new URL("../workflows/review-all.yml", import.meta.url), "utf8");
+  const jobTimeout = workflow.match(
+    /timeout-minutes:\s*\$\{\{\s*inputs\.codex_fallback_enabled\s*&&\s*(\d+)\s*\|\|\s*(\d+)\s*\}\}/u);
+  assert.ok(jobTimeout, "в review-all.yml не найден тайм-аут analyze-codex от codex_fallback_enabled");
+  assert.equal(Number(jobTimeout[1]) * 60_000, FALLBACK_JOB_TIMEOUT_MS);
+  assert.equal(Number(jobTimeout[2]) * 60_000, PRIMARY_JOB_TIMEOUT_MS);
+  assert.equal(defaultRoundBudgetMs(true), FALLBACK_JOB_TIMEOUT_MS - JOB_TIMEOUT_RESERVE_MS);
+  assert.equal(defaultRoundBudgetMs(false), PRIMARY_JOB_TIMEOUT_MS - JOB_TIMEOUT_RESERVE_MS);
+  assert.ok(defaultRoundBudgetMs(true) < FALLBACK_JOB_TIMEOUT_MS);
+  assert.ok(defaultRoundBudgetMs(false) < PRIMARY_JOB_TIMEOUT_MS);
+});
+
+test("slotTimeoutMs keeps a minimum window for every later profile", () => {
+  assert.equal(slotTimeoutMs({ remainingMs: 40 * 60_000, pendingSlots: 6 }), DEFAULT_ATTEMPT_TIMEOUT_MS);
+  assert.equal(slotTimeoutMs({ remainingMs: 20 * 60_000, pendingSlots: 2 }), 17 * 60_000);
+  assert.equal(slotTimeoutMs({ remainingMs: 6 * 60_000, pendingSlots: 2 }), MIN_SLOT_TIMEOUT_MS);
+  assert.equal(slotTimeoutMs({ remainingMs: 4 * 60_000, pendingSlots: 2 }), null);
+  assert.equal(slotTimeoutMs({ remainingMs: 0, pendingSlots: 1 }), null);
+});
+
+test("round spends the budget sequentially and gives every eligible slot a window", async t => {
+  const h = await harness(t);
+  const time = clock();
+  const timeouts = [];
+  await assert.rejects(runRound({ ...h.options, profileRoot: "/profiles", roundBudgetMs: 30 * 60_000,
+    profileWaitMs: 0, now: time.now, sleep: time.sleep, execute: async request => {
+      h.calls.push(request);
+      timeouts.push(request.timeoutMs);
+      time.advance(request.timeoutMs); // попытка расходует весь выданный ей лимит
+      return technical;
+    } }), /Ревью Codex не получено/u);
+  const audit = await h.audit();
+  assert.deepEqual(h.calls.map(call => call.slot), [
+    "account-1-spark", "account-1-sol", "account-2-spark", "account-2-sol", "account-3-spark", "account-3-sol",
+  ]);
+  const threeMinutes = 3 * 60_000;
+  assert.deepEqual(timeouts, [15 * 60_000, threeMinutes, threeMinutes, threeMinutes, threeMinutes, threeMinutes]);
+  assert.equal(timeouts.reduce((sum, ms) => sum + ms, 0), 30 * 60_000);
+  assert.ok(time.now() <= 30 * 60_000);
+  assert.deepEqual(audit.attempts.map(attempt => attempt.timeoutMs), timeouts);
+  assert.equal(audit.status, "unavailable");
+  assert.equal(audit.failure, "fallback_unavailable");
+});
+
+test("a round without room for a minimal slot stops in a controlled way", async t => {
+  const h = await harness(t);
+  const time = clock();
+  await assert.rejects(runRound({ ...h.options, profileRoot: "/profiles", roundBudgetMs: 1_000,
+    profileWaitMs: 0, now: time.now, sleep: time.sleep, execute: async request => {
+      h.calls.push(request);
+      return technical;
+    } }), /round_budget_exhausted/u);
+  assert.deepEqual(h.calls, []);
+  const audit = await h.audit();
+  assert.equal(audit.status, "unavailable");
+  assert.equal(audit.failure, "round_budget_exhausted");
+  assert.equal(audit.fallbackReserved, false);
+  assert.deepEqual(audit.attempts, []);
+});
+
+test("budget exhaustion keeps the reason of the last finished attempt", async t => {
+  const h = await harness(t);
+  const time = clock();
+  await assert.rejects(runRound({ ...h.options, profileRoot: "/profiles", roundBudgetMs: 20 * 60_000,
+    profileWaitMs: 0, now: time.now, sleep: time.sleep, execute: async request => {
+      h.calls.push(request);
+      time.advance(request.timeoutMs + 2 * 60_000); // запуск и guard не входят в лимит попытки
+      return technical;
+    } }), /provider_technical_failure/u);
+  assert.equal(h.calls.length, 1);
+  const audit = await h.audit();
+  assert.equal(audit.status, "unavailable");
+  assert.equal(audit.failure, "provider_technical_failure");
   assert.equal(audit.acceptedModel, null);
 });
