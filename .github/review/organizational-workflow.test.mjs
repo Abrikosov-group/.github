@@ -775,6 +775,7 @@ test("Opus сохраняет только подтверждённую моде
     [{ "claude-opus-5-5": {} }, 0],
     [{ "alias": { canonicalModel: "claude-opus-5-5" } }, 0],
     [{ "claude-sonnet-5": {} }, 1],
+    [{ "claude-haiku-4-5": {}, "claude-opus-5-5": {} }, 1],
     [{}, 1],
   ]) {
     const result = executeRunScript({
