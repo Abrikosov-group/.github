@@ -135,14 +135,14 @@ jobs:
     name: Повторить ИИ-ревью вручную
     needs: acknowledge-manual
     if: needs.acknowledge-manual.outputs.accepted == 'true'
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@cc69a0bc6b4548f4322cdc23c7ab67f2f6887ee4
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@8926749284fdf69d71eb03756fc8602d739fbc79
     with:
       trigger: manual
       command: ${{ github.event.comment.body }}
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
       claude_model: claude-opus-5-5
-      trusted_workflow_sha: cc69a0bc6b4548f4322cdc23c7ab67f2f6887ee4
+      trusted_workflow_sha: 8926749284fdf69d71eb03756fc8602d739fbc79
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       author_association: ${{ github.event.comment.author_association }}
@@ -250,14 +250,14 @@ jobs:
     concurrency:
       group: organizational-review-caller-auto-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
       cancel-in-progress: true
-    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@cc69a0bc6b4548f4322cdc23c7ab67f2f6887ee4
+    uses: Abrikosov-group/.github/.github/workflows/review-all.yml@8926749284fdf69d71eb03756fc8602d739fbc79
     with:
       trigger: automatic
       command: /review-all
       repository: ${{ github.repository }}
       trusted_workflow_repository: Abrikosov-group/.github
       claude_model: claude-opus-5-5
-      trusted_workflow_sha: cc69a0bc6b4548f4322cdc23c7ab67f2f6887ee4
+      trusted_workflow_sha: 8926749284fdf69d71eb03756fc8602d739fbc79
       pr_number: ${{ github.event.pull_request.number }}
       expected_head_sha: ${{ github.event.pull_request.head.sha }}
       automatic_base_refs: main

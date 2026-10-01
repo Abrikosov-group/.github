@@ -20,7 +20,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
-const organizationWorkflowSha = "cc69a0bc6b4548f4322cdc23c7ab67f2f6887ee4";
+const organizationWorkflowSha = "8926749284fdf69d71eb03756fc8602d739fbc79";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
