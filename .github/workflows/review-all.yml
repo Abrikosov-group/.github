@@ -96,6 +96,11 @@ name: Организационное двойное ИИ-ревью
         description: Точное имя доверенного runner Claude
         required: true
         type: string
+      claude_model:
+        description: Модель Claude для ревью; задаётся доверенным caller
+        required: false
+        default: claude-sonnet-5
+        type: string
       reuse_existing_reviews:
         description: Не запускать модель повторно, если для SHA уже есть ревью
         required: false
@@ -173,6 +178,7 @@ jobs:
       head_sha: ${{ steps.pr.outputs.head_sha }}
       trigger: ${{ steps.pr.outputs.trigger }}
       mode: ${{ steps.pr.outputs.mode }}
+      claude_model_label: ${{ steps.pr.outputs.claude_model_label }}
     env:
       GH_TOKEN: ${{ github.token }}
       CALLER_REPOSITORY: ${{ github.repository }}
@@ -191,6 +197,7 @@ jobs:
       TRUSTED_WORKFLOW_REPOSITORY: ${{ inputs.trusted_workflow_repository }}
       TRUSTED_WORKFLOW_SHA: ${{ inputs.trusted_workflow_sha }}
       TRUSTED_AUTOMATIC_BOT_LOGINS: ${{ inputs.trusted_automatic_bot_logins }}
+      CLAUDE_REVIEW_MODEL: ${{ inputs.claude_model }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -224,6 +231,15 @@ jobs:
             echo "::error::GitHub передал некорректный номер PR"
             exit 1
           fi
+          case "${CLAUDE_REVIEW_MODEL}" in
+            claude-sonnet-5) claude_model_label='Claude Sonnet 5' ;;
+            claude-opus-5-5) claude_model_label='Claude Opus 5.5' ;;
+            *)
+              echo "::error::Недопустимая модель Claude"
+              exit 1
+              ;;
+          esac
+
           case "${COMMAND}" in
             /review-all) mode="all" ;;
             /review-claude) mode="claude" ;;
@@ -444,6 +460,7 @@ jobs:
             echo "head_sha=${head_sha}"
             echo "trigger=${TRIGGER}"
             echo "mode=${mode}"
+            echo "claude_model_label=${claude_model_label}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "### Зафиксирован снимок PR"
@@ -480,6 +497,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
       REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
+      CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -571,11 +589,11 @@ jobs:
           if [[ "${MODE}" == "all" ]]; then
             heading='### 🚀 Двойное ИИ-ревью запущено'
             reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
-          - ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
+          - ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
           else
             heading='### 🚀 Ревью Claude запущено вручную'
-            reviewers="- ⏳ Claude Sonnet 5 (\`xhigh\`) — запущен"
+            reviewers="- ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения Claude._'
           fi
           if [[ "${MODE}" == "all" && "${DEEPSEEK_ENABLED:-false}" == "true" ]]; then
@@ -1298,7 +1316,7 @@ jobs:
 
 
   analyze-claude:
-    name: Проанализировать PR с Claude Sonnet 5
+    name: Проанализировать PR с Claude
     needs: [context, start-status]
     runs-on:
       group: ${{ inputs.review_runner_group }}
@@ -1465,6 +1483,7 @@ jobs:
           REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
           BINARY_MANIFEST_SHA256: ${{ steps.input.outputs.binary_manifest_sha256 }}
           BINARY_FILES: ${{ steps.input.outputs.binary_files }}
+          CLAUDE_REVIEW_MODEL: ${{ inputs.claude_model }}
         run: |
           set -euo pipefail
 
@@ -1473,7 +1492,7 @@ jobs:
             exit 0
           fi
 
-          marker="<!-- claude-review:${BASE_SHA}:${HEAD_SHA}:claude-sonnet-5 -->"
+          marker="<!-- claude-review:${BASE_SHA}:${HEAD_SHA}:${CLAUDE_REVIEW_MODEL} -->"
           coverage_marker="<!-- review-binary-coverage:sha256=${BINARY_MANIFEST_SHA256};files=${BINARY_FILES} -->"
           reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
           existing="$(jq -c --arg marker "${marker}" --arg coverage_marker "${coverage_marker}" --arg login "${REVIEW_PUBLISHER_LOGIN}" \
@@ -1606,7 +1625,8 @@ jobs:
             Для каждого замечания выбери точную изменённую строку diff. Если существенных
             дефектов нет, верни пустой массив `findings`.
           claude_args: |
-            --model claude-sonnet-5
+            --model ${{ inputs.claude_model }}
+            --settings '{"fastMode":false}'
             --effort xhigh
             --safe-mode
             --setting-sources user
@@ -1622,6 +1642,8 @@ jobs:
         env:
           REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
           REVIEW_ROOT: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_REVIEW_MODEL: ${{ inputs.claude_model }}
         run: |
           set -euo pipefail
           output_dir="${REVIEW_ROOT}/output"
@@ -1631,13 +1653,32 @@ jobs:
             (keys == ["findings"]) and
             (.findings | type == "array" and length <= 20)
           ' "${output_dir}/review.json" > /dev/null
+          actual_models='[]'
+          if [[ -n "${EXECUTION_FILE}" && -f "${EXECUTION_FILE}" ]]; then
+            actual_models="$(jq -c '
+              [.[] | select(.type == "result") | (.modelUsage // {}) |
+                to_entries[] | (.value.canonicalModel // .key)] | unique
+            ' "${EXECUTION_FILE}")"
+          fi
+          jq -n --arg requested "${CLAUDE_REVIEW_MODEL}" --argjson actual "${actual_models}" '
+            {requested_model:$requested, actual_models:$actual,
+             requested_effort:"xhigh", fast:false, automatic_fallback:false}
+          ' > "${output_dir}/profile.json"
+          jq -c . "${output_dir}/profile.json"
+          if [[ "${CLAUDE_REVIEW_MODEL}" == claude-opus-5-5 ]] &&
+             ! jq -e '.actual_models == ["claude-opus-5-5"]' "${output_dir}/profile.json" > /dev/null; then
+            echo "::error::Фактическая модель Opus 5.5 не подтверждена; ревью не будет опубликовано"
+            exit 1
+          fi
 
       - name: Передать результат Claude доверенному издателю
         if: steps.existing.outputs.needed == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: claude-review-output
-          path: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/output/review.json
+          path: |
+            ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/output/review.json
+            ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/output/profile.json
           if-no-files-found: error
           retention-days: 1
 
@@ -1794,7 +1835,8 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          REVIEW_MODEL: claude-sonnet-5
+          REVIEW_MODEL: ${{ inputs.claude_model }}
+          REVIEW_PROFILE_FILE: ${{ github.workspace }}/.review-output/claude/profile.json
           REVIEW_JSON_FILE: ${{ github.workspace }}/.review-output/claude/review.json
           DIFF_PATH: ${{ github.workspace }}/.review-input/trusted/pull-request.diff
           BINARY_MANIFEST_PATH: ${{ github.workspace }}/.review-input/trusted/binary-manifest.json
@@ -1802,6 +1844,13 @@ jobs:
           REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
         run: |
           set -euo pipefail
+          if [[ "${REVIEW_MODEL}" == claude-opus-5-5 ]]; then
+            jq -e '
+              .requested_model == "claude-opus-5-5" and
+              .actual_models == ["claude-opus-5-5"] and
+              .requested_effort == "xhigh" and .fast == false and .automatic_fallback == false
+            ' "${REVIEW_PROFILE_FILE}" > /dev/null
+          fi
           node _review_infra/.github/review/publish-claude-review.mjs
 
 
@@ -1839,6 +1888,7 @@ jobs:
       CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
       CODEX_REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
+      CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
       CODEX_FALLBACK_USED: ${{ needs.analyze-codex.outputs.fallback_used }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
       CODEX_PUBLISHED_BLOCKING_FINDINGS: ${{ needs.publish-codex.outputs.blocking_findings }}
@@ -1967,15 +2017,15 @@ jobs:
 
           claude_ok=false
           if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
-            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — анализ завершился ошибкой"
+            claude_line="- ❌ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — анализ завершился ошибкой"
           elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
             claude_ok=true
-            claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — актуальное ревью уже существует"
+            claude_line="- ✅ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — актуальное ревью уже существует"
           elif [[ "${CLAUDE_PUBLISH_RESULT}" == "success" ]]; then
             claude_ok=true
-            claude_line="- ✅ Claude Sonnet 5 (\`xhigh\`) — ревью опубликовано"
+            claude_line="- ✅ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — ревью опубликовано"
           else
-            claude_line="- ❌ Claude Sonnet 5 (\`xhigh\`) — публикация завершилась ошибкой"
+            claude_line="- ❌ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — публикация завершилась ошибкой"
           fi
 
           blocking_findings=0

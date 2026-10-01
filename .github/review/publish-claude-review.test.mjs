@@ -25,7 +25,7 @@ import {
 const BASE_SHA = "1".repeat(40);
 const HEAD_SHA = "2".repeat(40);
 const STANDARD_MODEL = "claude-sonnet-5";
-const DEEP_MODEL = "claude-opus-5";
+const DEEP_MODEL = "claude-opus-5-5";
 const SPARK_MODEL = "gpt-5.3-codex-spark";
 
 function pullRequestFixture({
@@ -445,7 +445,7 @@ test("различает обычное и углублённое ревью о�
   const deepPayload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, DEEP_MODEL);
 
   assert.notEqual(standardMarker, deepMarker);
-  assert.match(deepPayload.body, /Claude Opus 5, усилие `xhigh`/u);
+  assert.match(deepPayload.body, /Claude Opus 5\.5, усилие `xhigh`/u);
   assert.throws(
     () => reviewMarker(BASE_SHA, HEAD_SHA, "claude-unknown-5"),
     /REVIEW_MODEL/u,
@@ -871,7 +871,7 @@ test("публикует Opus после Sonnet для того же diff", asyn
   assert.equal(calls.length, 5);
   const payload = JSON.parse(calls[3].options.body);
   assert.ok(payload.body.startsWith(reviewMarker(BASE_SHA, HEAD_SHA, DEEP_MODEL)));
-  assert.match(payload.body, /Claude Opus 5/u);
+  assert.match(payload.body, /Claude Opus 5\.5/u);
 });
 
 test("[6] помечает опубликованное ревью устаревшим при закрытии PR и падает закрыто", async () => {

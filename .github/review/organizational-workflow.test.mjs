@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -19,7 +20,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
-const organizationWorkflowSha = "86f26d64bb986b0c1982c88690ce0178e68c74ed";
+const organizationWorkflowSha = "47f757afc90cf13b0ba4d6db7d649d4dde73e962";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -60,6 +61,7 @@ function executeRunScript({
   event = {},
   ghMock,
   commandMocks = {},
+  files = {},
 }) {
   const root = mkdtempSync(join(tmpdir(), "organizational-review-test-"));
   try {
@@ -79,6 +81,11 @@ function executeRunScript({
     writeFileSync(outputPath, "", "utf8");
     writeFileSync(summaryPath, "", "utf8");
     writeFileSync(ghLogPath, "", "utf8");
+    for (const [path, content] of Object.entries(files)) {
+      const target = join(root, path);
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, content, "utf8");
+    }
 
     const result = spawnSync("bash", ["-c", extractRunScript(source, stepName)], {
       encoding: "utf8",
@@ -101,6 +108,10 @@ function executeRunScript({
         CLAUDE_BINARY_FILES: "0",
         CLAUDE_BINARY_SUMMARY: "Исключённых бинарных файлов нет.",
         CLAUDE_BINARY_MANIFEST_SHA256: emptyManifestHash,
+        CLAUDE_REVIEW_MODEL: "claude-sonnet-5",
+        CLAUDE_MODEL_LABEL: "Claude Sonnet 5",
+        EXECUTION_FILE: join(root, "execution.json"),
+        REVIEW_ROOT: join(root, "review"),
         ...env,
       },
     });
@@ -110,6 +121,9 @@ function executeRunScript({
       outputs: readFileSync(outputPath, "utf8"),
       summary: readFileSync(summaryPath, "utf8"),
       ghLog: readFileSync(ghLogPath, "utf8"),
+      reviewProfile: existsSync(join(root, "review/output/profile.json"))
+        ? JSON.parse(readFileSync(join(root, "review/output/profile.json"), "utf8"))
+        : null,
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -567,6 +581,7 @@ test("центральный caller передаёт полный контрак
     "expected_codex_runner_name: sawabook-review-codex-179-198-117-215",
     "expected_claude_runner_name: sawabook-review-claude-179-198-117-215",
     "trusted_workflow_repository: Abrikosov-group/.github",
+    "claude_model: claude-opus-5-5",
     `trusted_workflow_sha: ${organizationWorkflowSha}`,
     "codex_fallback_enabled: true",
     "deepseek_enabled: true",
@@ -728,11 +743,63 @@ test("в выражениях workflow используются только п�
   );
 });
 
-test("обычное ревью Claude закреплено на Sonnet 5 с xhigh", () => {
-  assert.match(workflow, /--model claude-sonnet-5/u);
+test("default Claude остаётся Sonnet 5; доверенный caller выбирает модель с xhigh", () => {
+  assert.match(workflow, /claude_model:[\s\S]*?default: claude-sonnet-5/u);
+  assert.match(workflow, /--model \$\{\{ inputs\.claude_model \}\}/u);
   assert.match(workflow, /--effort xhigh/u);
-  assert.match(workflow, /REVIEW_MODEL: claude-sonnet-5/u);
+  assert.match(workflow, /REVIEW_MODEL: \$\{\{ inputs\.claude_model \}\}/u);
+  assert.match(workflow, /--settings '\{"fastMode":false\}'/u);
   assert.doesNotMatch(workflow, /--max-turns/u);
+});
+
+test("Opus 5.5 принимается из доверенного caller, неизвестная модель отклоняется до GitHub API", () => {
+  const accepted = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    event: automaticEvent("b".repeat(40)),
+    env: contextEnv({ CLAUDE_REVIEW_MODEL: "claude-opus-5-5", EXPECTED_HEAD_SHA: "b".repeat(40), MOCK_PR_JSON: prFixture() }),
+  });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.outputs, /claude_model_label=Claude Opus 5\.5/u);
+  const rejected = executeRunScript({
+    stepName: "Проверить источник запуска",
+    ghMock: contextGhMock,
+    env: contextEnv({ CLAUDE_REVIEW_MODEL: "claude-other" }),
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.equal(rejected.ghLog, "");
+});
+
+test("Opus сохраняет только подтверждённую модель; Sonnet и отсутствующее подтверждение отклоняются", () => {
+  for (const [modelUsage, expectedStatus] of [
+    [{ "claude-opus-5-5": {} }, 0],
+    [{ "alias": { canonicalModel: "claude-opus-5-5" } }, 0],
+    [{ "claude-sonnet-5": {} }, 1],
+    [{}, 1],
+  ]) {
+    const result = executeRunScript({
+      stepName: "Сохранить результат Claude для доверенного издателя",
+      ghMock: contextGhMock,
+      env: { REVIEW_JSON: '{"findings":[]}', CLAUDE_REVIEW_MODEL: "claude-opus-5-5" },
+      files: { "execution.json": JSON.stringify([{ type: "result", modelUsage, result: "Не включать сырой вывод" }]) },
+    });
+    assert.equal(result.status, expectedStatus, result.stderr);
+    assert.equal(result.reviewProfile.requested_model, "claude-opus-5-5");
+    assert.equal(result.reviewProfile.requested_effort, "xhigh");
+    assert.equal(result.reviewProfile.fast, false);
+    assert.equal(result.reviewProfile.automatic_fallback, false);
+    assert.equal(JSON.stringify(result.reviewProfile).includes("сырой вывод"), false);
+  }
+});
+
+test("стандартный caller Sonnet сохраняет прежнее поведение без обязательного modelUsage", () => {
+  const result = executeRunScript({
+    stepName: "Сохранить результат Claude для доверенного издателя",
+    ghMock: contextGhMock,
+    env: { REVIEW_JSON: '{"findings":[]}' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.reviewProfile.actual_models, []);
 });
 
 test("Claude не получает инструменты записи, shell или сеть", () => {
@@ -2222,7 +2289,7 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(startStatus, /--raw-field content='rocket'/u);
   assert.match(startStatus, /<!-- organizational-review-status -->/u);
   assert.match(startStatus, /GPT-5\.3-Codex-Spark \(\\`xhigh\\`\) — запущен/u);
-  assert.match(startStatus, /Claude Sonnet 5 \(\\`xhigh\\`\) — запущен/u);
+  assert.match(startStatus, /\$\{CLAUDE_MODEL_LABEL\} \(\\`xhigh\\`\) — запущен/u);
   assert.match(startStatus, /echo "comment_id=\$\{comment_id\}"/u);
   assert.match(finishStatus, /always\(\)/u);
   assert.match(finishStatus, /Двойное ИИ-ревью завершено/u);

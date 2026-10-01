@@ -29,6 +29,11 @@ const REVIEW_MODELS = new Map([
     marker: "claude-review",
     reviewer: "Claude",
   }],
+  ["claude-opus-5-5", {
+    displayName: "Claude Opus 5.5",
+    marker: "claude-review",
+    reviewer: "Claude",
+  }],
   ["gpt-5.6-sol", {
     displayName: "GPT-5.6 Sol",
     marker: "codex-review",
@@ -337,7 +342,7 @@ export function reviewMarker(baseSha, headSha, reviewModel) {
   }
   if (!REVIEW_MODELS.has(reviewModel)) {
     throw new Error(
-      "REVIEW_MODEL должен быть claude-sonnet-5, claude-opus-5 или gpt-5.3-codex-spark.",
+      `REVIEW_MODEL должен быть одной из поддерживаемых моделей: ${[...REVIEW_MODELS.keys()].join(", ")}.`,
     );
   }
   return `<!-- ${REVIEW_MODELS.get(reviewModel).marker}:${baseSha}:${headSha}:${reviewModel} -->`;
