@@ -1584,11 +1584,32 @@ jobs:
           fi
           echo "allowed_bots=$(sed 's/\[bot\]//g' <<< "${TRUSTED_AUTOMATIC_BOT_LOGINS}")" >> "${GITHUB_OUTPUT}"
 
+      - name: Подготовить закреплённый CLI Claude с поддержкой Opus 5.5
+        if: steps.existing.outputs.needed == 'true'
+        shell: bash
+        env:
+          REVIEW_ROOT: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cli_path="${REVIEW_ROOT}/bin/claude"
+          mkdir -p "${REVIEW_ROOT}/bin"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --max-time 120 --retry 2 \
+            https://downloads.claude.ai/claude-code-releases/2.1.286/linux-x64/claude \
+            --output "${cli_path}"
+          printf '%s  %s\n' \
+            fe503f65c6289d59c23e5b21ae44f03583f997dd33a2cbfc75ab4f96fb8fc73f \
+            "${cli_path}" | sha256sum --check --status
+          chmod 700 "${cli_path}"
+          test "$("${cli_path}" --version)" = '2.1.286 (Claude Code)'
+
       - name: Выполнить изолированное review-only ревью
         if: steps.existing.outputs.needed == 'true'
         id: claude
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1
         with:
+          path_to_claude_code_executable: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/bin/claude
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           include_fix_links: false
@@ -1635,6 +1656,25 @@ jobs:
             --allowedTools "Read(./.review-input/pull-request.diff),Read(./.review-input/binary-manifest.json)"
             --disallowedTools "Agent,Task,TaskOutput,Glob,Grep,Bash,Edit,Write,MultiEdit,NotebookEdit,NotebookEditCell,Replace,WebFetch,WebSearch"
             --json-schema '{"type":"object","properties":{"findings":{"type":"array","maxItems":20,"items":{"type":"object","properties":{"priority":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string","minLength":1,"maxLength":512},"line":{"type":"integer","minimum":1,"maximum":10000000},"side":{"type":"string","enum":["LEFT","RIGHT"]},"title":{"type":"string","minLength":1,"maxLength":160},"body":{"type":"string","minLength":1,"maxLength":2000}},"required":["priority","path","line","side","title","body"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
+
+      - name: Сохранить причину сбоя Claude
+        if: always() && steps.claude.outcome == 'failure'
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_DIAGNOSTIC_FILE: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/diagnostic/failure.json
+        run: |
+          set -euo pipefail
+          node _review_infra/.github/review/claude-failure-diagnostic.mjs
+
+      - name: Сохранить диагностику сбоя Claude в артефакт
+        if: always() && steps.claude.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: claude-review-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/diagnostic/failure.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Сохранить результат Claude для доверенного издателя
         if: steps.existing.outputs.needed == 'true'
