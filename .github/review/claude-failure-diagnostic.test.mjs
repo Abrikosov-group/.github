@@ -54,6 +54,26 @@ test("successful response is not mistaken for authentication error", () => {
   assert.equal(value.result_success, true);
 });
 
+test("recovered API error does not replace the final successful result", () => {
+  const value = summarizeFailure([
+    { type: "assistant", isApiErrorMessage: true,
+      message: { content: [{ type: "text", text: "API Error: 429 rate limit" }] } },
+    { type: "result", subtype: "success", is_error: false, result: "ok", structured_output: null },
+  ]);
+  assert.equal(value.reason, "structured_output_or_action_error");
+  assert.equal(value.result_success, true);
+});
+
+test("malformed assistant content cannot hide a valid terminal error", () => {
+  for (const content of [null, "401", {}, 7]) {
+    const value = summarizeFailure([
+      { type: "assistant", isApiErrorMessage: true, message: { content } },
+      { type: "result", subtype: "success", is_error: true, result: "Not logged in" },
+    ]);
+    assert.equal(value.reason, "authentication");
+  }
+});
+
 test("only exact regular SDK file is read; missing and malformed files produce a diagnostic", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "claude-failure-test-")));
   const file = join(root, "claude-execution-output.json");

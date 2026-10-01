@@ -21,10 +21,11 @@ export function summarizeFailure(messages) {
     ? messages.findLast((item) => item?.type === "result") : null;
   const failed = result && (result.is_error === true || result.subtype !== "success");
   const texts = failed ? [result.result, ...(Array.isArray(result.errors) ? result.errors : [])] : [];
-  if (Array.isArray(messages)) {
+  if (Array.isArray(messages) && (!result || failed)) {
     for (const item of messages) {
       if (item?.type !== "assistant" || item.isApiErrorMessage !== true) continue;
-      for (const block of item.message?.content ?? []) {
+      const content = Array.isArray(item.message?.content) ? item.message.content : [];
+      for (const block of content) {
         if (block?.type === "text") texts.push(block.text);
       }
     }
