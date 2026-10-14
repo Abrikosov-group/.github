@@ -40,12 +40,12 @@ export function slotTimeoutMs({ remainingMs, pendingSlots, attemptTimeoutMs = DE
   return Math.min(attemptTimeoutMs, available);
 }
 export const CODEX_SLOTS = [
+  { slot: "account-3-spark", profileId: "account-3", model: PRIMARY_MODEL },
+  { slot: "account-3-sol", profileId: "account-3", model: FALLBACK_MODEL },
   { slot: "account-1-spark", profileId: "account-1", model: PRIMARY_MODEL },
   { slot: "account-1-sol", profileId: "account-1", model: FALLBACK_MODEL },
   { slot: "account-2-spark", profileId: "account-2", model: PRIMARY_MODEL },
   { slot: "account-2-sol", profileId: "account-2", model: FALLBACK_MODEL },
-  { slot: "account-3-spark", profileId: "account-3", model: PRIMARY_MODEL },
-  { slot: "account-3-sol", profileId: "account-3", model: FALLBACK_MODEL },
 ];
 const SHA = /^[a-f0-9]{40}$/u;
 const MAX_OUTPUT = 2 * 1024 * 1024;
@@ -58,6 +58,34 @@ const DIAGNOSTIC_CODES = new Set([
   "internal_server_error", "service_unavailable", "connection_reset", "connection_error",
 ]);
 const LAUNCH_CODES = new Set(["ENOENT", "EACCES", "EPERM", "ENOEXEC", "E2BIG"]);
+const ROUND_STATUSES = new Set(["claimed", "running", "accepted", "unavailable", "cancelled", "interrupted"]);
+const ROUND_FAILURES = new Set([
+  "fallback_unavailable", "round_budget_exhausted", "profile_busy_timeout", "no_eligible_report",
+  "cancelled", "guard_or_execution_failure", "primary_timeout", "primary_model_limit",
+  "primary_model_unavailable", "model_limit", "model_unavailable", "account_limit",
+  "provider_technical_failure",
+]);
+const ATTEMPT_STATUSES = new Set(["reserved", "finished", "busy", "interrupted"]);
+const DIAGNOSTIC_CATEGORIES = new Set([
+  "accepted", "output_limit", "timeout", "signal_termination", "invalid_report",
+  "authentication", "shared_quota", "model_limit", "invalid_input", "model_unavailable",
+  "provider_failure", "missing_report", "process_failed", "cli_configuration",
+  "tls_failure", "profile_busy", "execution_failed",
+]);
+const SLOT_IDS = new Set([...CODEX_SLOTS.map(({ slot }) => slot), "single-spark", "single-sol"]);
+
+// round.json is read back from disk after a failure, so treat even its strings as
+// untrusted. Only fixed identifiers are allowed into the CI log; never print a
+// provider message, model output or stderr. The last six attempts fit one line.
+export function roundFailureSummary(audit) {
+  const allowed = (value, values) => values.has(value) ? value : "unknown";
+  const attempts = Array.isArray(audit?.attempts) ? audit.attempts : [];
+  const recent = attempts.slice(-6).map(attempt =>
+    `${allowed(attempt?.slot, SLOT_IDS)}:${allowed(attempt?.status, ATTEMPT_STATUSES)}`
+      + `/${allowed(attempt?.diagnostic?.category, DIAGNOSTIC_CATEGORIES)}`);
+  return `status=${allowed(audit?.status, ROUND_STATUSES)}; failure=${allowed(audit?.failure, ROUND_FAILURES)}`
+    + `; attempts=${recent.join(",") || "none"}`;
+}
 
 function structuredErrors(events = "") {
   const errors = [];
@@ -438,10 +466,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (process.env.GITHUB_OUTPUT) await writeFile(process.env.GITHUB_OUTPUT,
       `review_model=${audit.acceptedModel}\nfallback_used=${audit.fallbackReserved}\n`, { flag: "a" });
     console.log(`Codex: ${audit.acceptedModel}, xhigh, service_tier=${audit.attempts.at(-1).serviceTier ?? "не задан"}; резерв: ${audit.fallbackReserved}.`);
-  }).catch(() => {
-    // Error text can contain a child stderr or a transport response. Only the
-    // bounded, non-sensitive audit enums leave the runner.
-    console.error("Ревью Codex не получено; причина и попытки записаны в round.json.");
+  }).catch(async () => {
+    // Error text can contain a child stderr or a transport response. Read only
+    // allowlisted identifiers from the persisted audit, not the thrown error.
+    let summary = "диагностика недоступна";
+    try {
+      const auditPath = join(resolve(process.env.REVIEW_ROOT), "output", "round.json");
+      summary = roundFailureSummary(JSON.parse(await readFile(auditPath, "utf8")));
+    } catch { /* The audit may not exist if snapshot validation failed. */ }
+    console.error(`Ревью Codex не получено; ${summary}. Подробности в round.json.`);
     process.exitCode = 1;
   });
 }
