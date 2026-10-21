@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const script = fileURLToPath(new URL("./runner-group-workflows.mjs", import.meta.url));
-const originalWorkflow = "Abrikosov-group/.github/.github/workflows/review-all.yml@abc123";
-const addedWorkflow = "Abrikosov-group/Telegram_channel/.github/workflows/review-all.yml@refs/heads/staging";
-const telegramId = 1109363720;
-const sawabookId = 1292854106;
+const originalWorkflow = "example-org/.github/.github/workflows/review-all.yml@abc123";
+const addedWorkflow = "example-org/sample-project/.github/workflows/review-all.yml@refs/heads/staging";
+const firstRepoId = 111111111;
+const secondRepoId = 222222222;
 
 const fakeGh = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -24,21 +24,36 @@ state.calls.push({ method, endpoint, body });
 const save = () => fs.writeFileSync(file, JSON.stringify(state));
 const repositories = endpoint.match(/\\/repositories\\?per_page=100&page=(\\d+)$/);
 const addRepository = endpoint.match(/\\/repositories\\/(\\d+)$/);
-if (method === "GET" && repositories) {
+if (method === "GET" && repositories && state.patchApplied && state.failReadsAfterPatch) {
+  process.stderr.write("forced repository GET failure");
+  process.exitCode = 1;
+} else if (method === "GET" && repositories) {
   const page = Number(repositories[1]);
   const ids = state.repositories.slice((page - 1) * 100, page * 100);
   const totalCount = state.repositories.length;
   if (page === 1 && state.removeAfterFirstPage) {
     state.repositories = state.repositories.filter(id => id !== state.removeAfterFirstPage);
   }
+  if (page === 1 && state.swapAfterFirstPage) {
+    const { removedId, addedId } = state.swapAfterFirstPage;
+    state.repositories = state.repositories.filter(id => id !== removedId);
+    state.repositories.push(addedId);
+    delete state.swapAfterFirstPage;
+  }
   process.stdout.write(JSON.stringify({
     total_count: totalCount,
     repositories: ids.map(id => ({ id })),
   }));
-} else if (method === "GET" && endpoint.endsWith("/3")) {
-  process.stdout.write(JSON.stringify(state.group));
-} else if (method === "PATCH" && endpoint.endsWith("/3")) {
+} else if (method === "GET" && endpoint.endsWith("/987654321")) {
+  const snapshot = JSON.stringify(state.group);
+  if (state.addWorkflowAfterFirstGroupRead && !state.groupChanged) {
+    state.group.selected_workflows.push(state.addWorkflowAfterFirstGroupRead);
+    state.groupChanged = true;
+  }
+  process.stdout.write(snapshot);
+} else if (method === "PATCH" && endpoint.endsWith("/987654321")) {
   state.group = { ...state.group, ...body };
+  state.patchApplied = true;
   if (state.resetOnPatch) state.repositories = [];
   save();
   process.stdout.write(JSON.stringify(state.group));
@@ -72,18 +87,23 @@ function run(t, state, extraArgs = []) {
   writeFileSync(stateFile, JSON.stringify({ calls: [], resetOnPatch: true, ...state }));
   const args = [
     script,
-    "--org", "Abrikosov-group",
-    "--group-id", "3",
+    "--org", "example-org",
+    "--group-id", "987654321",
     "--add-workflow", addedWorkflow,
-    "--require-repo-id", String(telegramId),
-    "--require-repo-id", String(sawabookId),
+    "--require-repo-id", String(firstRepoId),
+    "--require-repo-id", String(secondRepoId),
     ...extraArgs,
   ];
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) {
+    if (key.startsWith("GH_") || key.startsWith("GITHUB_")) delete environment[key];
+  }
   const result = spawnSync(process.execPath, args, {
     encoding: "utf8",
     env: {
-      ...process.env,
-      PATH: directory + delimiter + process.env.PATH,
+      ...environment,
+      RUNNER_GROUP_GH_EXECUTABLE: join(directory, "gh"),
+      GH_CONFIG_DIR: directory,
       GH_STUB_STATE: stateFile,
     },
   });
@@ -103,23 +123,23 @@ function group() {
 test("dry run reads membership without changing the group", t => {
   const { result, state } = run(t, {
     group: group(),
-    repositories: [telegramId, sawabookId],
+    repositories: [firstRepoId, secondRepoId],
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Dry run/);
   assert.deepEqual(state.group.selected_workflows, [originalWorkflow]);
-  assert.deepEqual(state.repositories, [telegramId, sawabookId]);
+  assert.deepEqual(state.repositories, [firstRepoId, secondRepoId]);
   assert.ok(state.calls.every(call => call.method === "GET"));
 });
 
 test("an update that clears access restores every original repository", t => {
-  const thirdRepository = 1318808569;
+  const thirdRepository = 333333333;
   const { result, state } = run(t, {
     group: group(),
-    repositories: [telegramId, sawabookId, thirdRepository],
+    repositories: [firstRepoId, secondRepoId, thirdRepository],
   }, ["--apply"]);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(new Set(state.repositories), new Set([telegramId, sawabookId, thirdRepository]));
+  assert.deepEqual(new Set(state.repositories), new Set([firstRepoId, secondRepoId, thirdRepository]));
   assert.deepEqual(state.group.selected_workflows, [originalWorkflow, addedWorkflow]);
   const patch = state.calls.find(call => call.method === "PATCH");
   assert.ok(patch);
@@ -131,11 +151,11 @@ test("an update that clears access restores every original repository", t => {
 test("a PATCH error after mutation still restores the original repositories", t => {
   const { result, state } = run(t, {
     group: group(),
-    repositories: [telegramId, sawabookId],
+    repositories: [firstRepoId, secondRepoId],
     failPatchAfterMutation: true,
   }, ["--apply"]);
   assert.equal(result.status, 1);
-  assert.deepEqual(new Set(state.repositories), new Set([telegramId, sawabookId]));
+  assert.deepEqual(new Set(state.repositories), new Set([firstRepoId, secondRepoId]));
   assert.match(result.stderr, /PATCH.*failed/);
   assert.doesNotMatch(result.stdout, /workflow added/);
 });
@@ -143,7 +163,7 @@ test("a PATCH error after mutation still restores the original repositories", t 
 test("a missing required repository blocks the change before PATCH", t => {
   const { result, state } = run(t, {
     group: group(),
-    repositories: [telegramId],
+    repositories: [firstRepoId],
   }, ["--apply"]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /already missing a required repository/);
@@ -151,8 +171,8 @@ test("a missing required repository blocks the change before PATCH", t => {
 });
 
 test("a repository removed between pagination pages blocks PATCH", t => {
-  const removedId = 2000000000;
-  const repositories = [telegramId, sawabookId, ...Array.from({ length: 98 }, (_, i) => removedId + i)];
+  const removedId = 444444444;
+  const repositories = [firstRepoId, secondRepoId, ...Array.from({ length: 98 }, (_, i) => removedId + i)];
   const { result, state } = run(t, {
     group: group(),
     repositories,
@@ -163,14 +183,58 @@ test("a repository removed between pagination pages blocks PATCH", t => {
   assert.ok(state.calls.every(call => call.method === "GET"));
 });
 
+test("a same-count repository swap between pages blocks PATCH", t => {
+  const removedId = 444444444;
+  const addedId = 555555555;
+  const repositories = [firstRepoId, secondRepoId, ...Array.from({ length: 99 }, (_, i) => removedId + i)];
+  const { result, state } = run(t, {
+    group: group(),
+    repositories,
+    swapAfterFirstPage: { removedId, addedId },
+  }, ["--apply"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /changed between complete reads/);
+  assert.ok(state.calls.every(call => call.method === "GET"));
+});
+
+test("a concurrent workflow update before PATCH blocks the change", t => {
+  const externalWorkflow = "example-org/other-project/.github/workflows/check.yml@refs/heads/main";
+  const { result, state } = run(t, {
+    group: group(),
+    repositories: [firstRepoId, secondRepoId],
+    addWorkflowAfterFirstGroupRead: externalWorkflow,
+  }, ["--apply"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /changed during preflight/);
+  assert.deepEqual(state.group.selected_workflows, [originalWorkflow, externalWorkflow]);
+  assert.ok(state.calls.every(call => call.method === "GET"));
+});
+
 test("failed restoration exits with an error instead of claiming success", t => {
   const { result, state } = run(t, {
     group: group(),
-    repositories: [telegramId, sawabookId],
-    failPutId: sawabookId,
+    repositories: [firstRepoId, secondRepoId],
+    failPutId: secondRepoId,
   }, ["--apply"]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /could not be restored/);
-  assert.equal(state.repositories.includes(sawabookId), false);
+  assert.equal(state.repositories.includes(secondRepoId), false);
   assert.doesNotMatch(result.stdout, /workflow added/);
+});
+
+test("an uncertain PATCH keeps the original IDs and all recovery errors visible", t => {
+  const { result, state } = run(t, {
+    group: group(),
+    repositories: [firstRepoId, secondRepoId],
+    failPatchAfterMutation: true,
+    failReadsAfterPatch: true,
+    failPutId: secondRepoId,
+  }, ["--apply"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /original repository IDs: 111111111, 222222222/);
+  assert.match(result.stderr, /original repository IDs: 111111111, 222222222/);
+  assert.match(result.stderr, /PATCH:.*forced PATCH failure/);
+  assert.match(result.stderr, /failed PUTs:.*222222222:.*forced PUT failure/);
+  assert.match(result.stderr, /verification:.*forced repository GET failure/);
+  assert.equal(state.repositories.includes(secondRepoId), false);
 });

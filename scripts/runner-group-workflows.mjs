@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { isAbsolute } from "node:path";
 
 const usage = `Usage:
   node scripts/runner-group-workflows.mjs \
@@ -60,7 +61,11 @@ function api(method, endpoint, body) {
   const args = ["api", "--method", method];
   if (body !== undefined) args.push("--input", "-");
   args.push(endpoint);
-  const result = spawnSync("gh", args, {
+  const ghExecutable = process.env.RUNNER_GROUP_GH_EXECUTABLE;
+  if (ghExecutable && !isAbsolute(ghExecutable)) {
+    throw new Error("RUNNER_GROUP_GH_EXECUTABLE must be an absolute path");
+  }
+  const result = spawnSync(ghExecutable || "gh", args, {
     encoding: "utf8",
     input: body === undefined ? undefined : JSON.stringify(body),
     maxBuffer: 4 * 1024 * 1024,
@@ -77,7 +82,7 @@ function api(method, endpoint, body) {
   }
 }
 
-function readRepositories(groupPath) {
+function readRepositoriesOnce(groupPath) {
   const ids = [];
   let totalCount;
   for (let page = 1; page <= 1000; page += 1) {
@@ -105,6 +110,21 @@ function readRepositories(groupPath) {
   throw new Error("Selected-repositories list exceeded 1000 pages");
 }
 
+function sameIds(left, right) {
+  if (left.length !== right.length) return false;
+  const rightIds = new Set(right);
+  return left.every(id => rightIds.has(id));
+}
+
+function readRepositories(groupPath) {
+  const first = readRepositoriesOnce(groupPath);
+  const second = readRepositoriesOnce(groupPath);
+  if (!sameIds(first, second)) {
+    throw new Error("Selected-repositories list changed between complete reads");
+  }
+  return second;
+}
+
 function assertGroup(group) {
   if (
     !group || typeof group.name !== "string" ||
@@ -118,6 +138,16 @@ function assertGroup(group) {
   if (group.inherited || group.workflow_restrictions_read_only) {
     throw new Error("The group's workflow restrictions are read-only here");
   }
+}
+
+function groupSettings(group) {
+  return JSON.stringify({
+    name: group.name,
+    visibility: group.visibility,
+    allows_public_repositories: group.allows_public_repositories,
+    restricted_to_workflows: group.restricted_to_workflows,
+    selected_workflows: [...group.selected_workflows].sort(),
+  });
 }
 
 function repairRepositories(groupPath, originalIds) {
@@ -139,11 +169,20 @@ function repairRepositories(groupPath, originalIds) {
       failures.push(`${id}: ${error.message}`);
     }
   }
-  const verified = new Set(readRepositories(groupPath));
+  let verified;
+  try {
+    verified = new Set(readRepositories(groupPath));
+  } catch (error) {
+    throw new Error(
+      `Repository access could not be verified; original IDs: ${originalIds.join(", ")}; ` +
+      `failed PUTs: ${failures.join("; ") || "none"}; verification: ${error.message}`,
+    );
+  }
   const stillMissing = originalIds.filter(id => !verified.has(id));
   if (failures.length || stillMissing.length) {
     throw new Error(
-      `Repository access could not be restored; missing: ${stillMissing.join(", ") || "none"}; ` +
+      `Repository access could not be restored; original IDs: ${originalIds.join(", ")}; ` +
+      `missing: ${stillMissing.join(", ") || "none"}; ` +
       `failed PUTs: ${failures.join("; ") || "none"}`,
     );
   }
@@ -172,6 +211,13 @@ function main() {
     );
     return;
   }
+  const latestIds = readRepositories(groupPath);
+  const latestGroup = api("GET", groupPath);
+  assertGroup(latestGroup);
+  if (!sameIds(beforeIds, latestIds) || groupSettings(beforeGroup) !== groupSettings(latestGroup)) {
+    throw new Error("Group settings or repository access changed during preflight; no change was made");
+  }
+  console.log(`Before PATCH group ${options.groupId}, original repository IDs: ${beforeIds.join(", ")}`);
 
   let patchError;
   try {
@@ -188,8 +234,20 @@ function main() {
   } catch (error) {
     patchError = error;
   }
-  const restoredCount = repairRepositories(groupPath, beforeIds);
-  if (patchError) throw patchError;
+  let restoredCount;
+  let recoveryError;
+  try {
+    restoredCount = repairRepositories(groupPath, beforeIds);
+  } catch (error) {
+    recoveryError = error;
+  }
+  if (patchError || recoveryError) {
+    throw new Error(
+      `Group update not verified; original repository IDs: ${beforeIds.join(", ")}; ` +
+      `PATCH: ${patchError?.message ?? "completed"}; ` +
+      `recovery: ${recoveryError?.message ?? "verified"}`,
+    );
+  }
 
   const afterGroup = api("GET", groupPath);
   assertGroup(afterGroup);
