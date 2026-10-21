@@ -172,8 +172,10 @@ function main() {
 
   let patchError;
   try {
-    // Updating visibility was observed to clear selected repositories.
-    // It is unchanged here, so omit it and verify membership immediately.
+    // GitHub requires `name` in this PATCH; `visibility` is optional:
+    // https://docs.github.com/en/rest/actions/self-hosted-runner-groups#update-a-self-hosted-runner-group-for-an-organization
+    // Repeating visibility=selected cleared repository access on 19 Oct 2026.
+    // Omit it, then verify and restore membership immediately.
     api("PATCH", groupPath, {
       name: beforeGroup.name,
       allows_public_repositories: beforeGroup.allows_public_repositories,
