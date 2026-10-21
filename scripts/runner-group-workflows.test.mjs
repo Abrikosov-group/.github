@@ -27,8 +27,12 @@ const addRepository = endpoint.match(/\\/repositories\\/(\\d+)$/);
 if (method === "GET" && repositories) {
   const page = Number(repositories[1]);
   const ids = state.repositories.slice((page - 1) * 100, page * 100);
+  const totalCount = state.repositories.length;
+  if (page === 1 && state.removeAfterFirstPage) {
+    state.repositories = state.repositories.filter(id => id !== state.removeAfterFirstPage);
+  }
   process.stdout.write(JSON.stringify({
-    total_count: state.repositories.length,
+    total_count: totalCount,
     repositories: ids.map(id => ({ id })),
   }));
 } else if (method === "GET" && endpoint.endsWith("/3")) {
@@ -143,6 +147,19 @@ test("a missing required repository blocks the change before PATCH", t => {
   }, ["--apply"]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /already missing a required repository/);
+  assert.ok(state.calls.every(call => call.method === "GET"));
+});
+
+test("a repository removed between pagination pages blocks PATCH", t => {
+  const removedId = 2000000000;
+  const repositories = [telegramId, sawabookId, ...Array.from({ length: 98 }, (_, i) => removedId + i)];
+  const { result, state } = run(t, {
+    group: group(),
+    repositories,
+    removeAfterFirstPage: removedId,
+  }, ["--apply"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /changed while reading pages/);
   assert.ok(state.calls.every(call => call.method === "GET"));
 });
 

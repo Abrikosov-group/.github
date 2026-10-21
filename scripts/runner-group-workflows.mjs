@@ -86,6 +86,9 @@ function readRepositories(groupPath) {
       throw new Error("Could not read the complete selected-repositories list");
     }
     totalCount ??= result.total_count;
+    if (result.total_count !== totalCount) {
+      throw new Error("Selected-repositories list changed while reading pages");
+    }
     for (const repository of result.repositories) {
       if (!Number.isSafeInteger(repository.id) || repository.id <= 0) {
         throw new Error("Repository response contains an invalid ID");
