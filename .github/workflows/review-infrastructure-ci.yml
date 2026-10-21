@@ -12,6 +12,7 @@ name: Проверка инфраструктуры ИИ-ревью
       - "workflow-templates/review-all.properties.json"
       - "CONTRIBUTING.md"
       - "README.md"
+      - "scripts/**"
   push:
     branches: [main]
     paths:
@@ -24,6 +25,7 @@ name: Проверка инфраструктуры ИИ-ревью
       - "workflow-templates/review-all.properties.json"
       - "CONTRIBUTING.md"
       - "README.md"
+      - "scripts/**"
 
 permissions:
   contents: read
@@ -52,3 +54,6 @@ jobs:
 
       - name: Выполнить контрактные тесты
         run: node --test .github/review/*.test.mjs
+
+      - name: Проверить защиту групп раннеров
+        run: node --test scripts/*.test.mjs
