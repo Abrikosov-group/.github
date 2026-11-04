@@ -101,6 +101,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: claude-sonnet-5
         type: string
+      claude_enabled:
+        description: Выполнять независимое ревью Claude; false оставляет обязательный Codex
+        required: false
+        default: true
+        type: boolean
       reuse_existing_reviews:
         description: Не запускать модель повторно, если для SHA уже есть ревью
         required: false
@@ -144,8 +149,8 @@ name: Организационное двойное ИИ-ревью
         description: Устаревший совместимый секрет; новое ревью его не использует
         required: false
       CLAUDE_CODE_OAUTH_TOKEN:
-        description: Подписочный OAuth-токен Claude Code
-        required: true
+        description: Подписочный OAuth-токен Claude Code; нужен при claude_enabled=true
+        required: false
       REVIEW_GATE_APP_PRIVATE_KEY:
         description: Private key GitHub App доверенного издателя
         required: false
@@ -155,6 +160,7 @@ permissions: {}
 env:
   REVIEW_DRAFTS: ${{ inputs.review_drafts }}
   DEEPSEEK_ENABLED: ${{ inputs.deepseek_enabled }}
+  CLAUDE_ENABLED: ${{ inputs.claude_enabled }}
 
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
@@ -454,6 +460,13 @@ jobs:
             echo "::notice::Событие относится к ${EXPECTED_HEAD_SHA}, выбран текущий Head ${head_sha}"
           fi
 
+          if [[ "${mode}" == "claude" && "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+            message='Claude отключён (claude_enabled=false); /review-claude не выполнялась. Используйте /review-all для ревью Codex.'
+            echo "::error::${message}"
+            echo "### ${message}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
           {
             echo "base_ref=${base_ref}"
             echo "base_sha=${base_sha}"
@@ -591,6 +604,12 @@ jobs:
             reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
           - ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
+            if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+              heading='### 🚀 ИИ-ревью Codex запущено'
+              reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+          - ⏭ Claude — отключён (claude_enabled=false), ревью не выполняется"
+              footer='_Этот комментарий обновится после завершения Codex._'
+            fi
           else
             heading='### 🚀 Ревью Claude запущено вручную'
             reviewers="- ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
@@ -645,11 +664,15 @@ jobs:
           echo "comment_id=${comment_id}" >> "${GITHUB_OUTPUT}"
 
           if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
+            gate_description='Codex и Claude проверяют текущий commit'
+            if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+              gate_description='Codex проверяет текущий commit; Claude отключён'
+            fi
             gh api --method POST \
               "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
               --raw-field state='pending' \
               --raw-field context="${REVIEW_GATE_CONTEXT}" \
-              --raw-field description='Codex и Claude проверяют текущий commit' \
+              --raw-field description="${gate_description}" \
               --raw-field target_url="${RUN_URL}" > /dev/null
           fi
 
@@ -1318,6 +1341,7 @@ jobs:
   analyze-claude:
     name: Проанализировать PR с Claude
     needs: [context, start-status]
+    if: inputs.claude_enabled
     runs-on:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.claude_runner_label }}
@@ -1349,6 +1373,17 @@ jobs:
           test "${RUNNER_OS}" = Linux
           test "${RUNNER_ARCH}" = X64
           test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
+
+      - name: Проверить OAuth включённого Claude
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]]; then
+            echo '::error::Для claude_enabled=true требуется CLAUDE_CODE_OAUTH_TOKEN'
+            exit 1
+          fi
 
       - name: Получить точный Base в защищённый корень
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1739,7 +1774,7 @@ jobs:
   publish-claude:
     name: Опубликовать проверенное ревью Claude
     needs: [context, start-status, analyze-claude]
-    if: needs.analyze-claude.outputs.review_needed == 'true'
+    if: inputs.claude_enabled && needs.analyze-claude.outputs.review_needed == 'true'
     runs-on:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.orchestration_runner_label }}
@@ -2058,7 +2093,10 @@ jobs:
           fi
 
           claude_ok=false
-          if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
+          if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+            claude_ok=true
+            claude_line='- ⏭ Claude — отключён (claude_enabled=false), ревью не выполнялось'
+          elif [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
             claude_line="- ❌ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — анализ завершился ошибкой"
           elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
             claude_ok=true
@@ -2077,18 +2115,24 @@ jobs:
             else
               codex_count="${CODEX_REUSED_BLOCKING_FINDINGS}"
             fi
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] || codex_ok=false
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] &&
+            if [[ "${codex_count}" =~ ^[0-9]+$ ]]; then
               blocking_findings=$((blocking_findings + codex_count))
+            else
+              codex_ok=false
+            fi
           fi
-          if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
-            claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
-          else
-            claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+          if [[ "${CLAUDE_ENABLED:-true}" != "false" ]]; then
+            if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
+              claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
+            else
+              claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+            fi
+            if [[ "${claude_count}" =~ ^[0-9]+$ ]]; then
+              blocking_findings=$((blocking_findings + claude_count))
+            else
+              claude_ok=false
+            fi
           fi
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] || claude_ok=false
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] &&
-            blocking_findings=$((blocking_findings + claude_count))
 
           binary_input_ok=false
           if [[ "${MODE}" == "all" ]]; then
@@ -2096,10 +2140,11 @@ jobs:
             binary_files="${CODEX_BINARY_FILES}"
             if [[ "${#CODEX_BINARY_MANIFEST_SHA256}" -eq 64 &&
                   "${CODEX_BINARY_MANIFEST_SHA256}" =~ ^[0-9a-f]+$ &&
-                  "${CODEX_BINARY_MANIFEST_SHA256}" == "${CLAUDE_BINARY_MANIFEST_SHA256}" &&
                   "${CODEX_BINARY_FILES}" =~ ^[0-9]+$ &&
-                  "${CODEX_BINARY_FILES}" == "${CLAUDE_BINARY_FILES}" &&
-                  "${CODEX_BINARY_SUMMARY}" == "${CLAUDE_BINARY_SUMMARY}" ]]; then
+                  ( "${CLAUDE_ENABLED:-true}" == "false" ||
+                    ( "${CODEX_BINARY_MANIFEST_SHA256}" == "${CLAUDE_BINARY_MANIFEST_SHA256}" &&
+                      "${CODEX_BINARY_FILES}" == "${CLAUDE_BINARY_FILES}" &&
+                      "${CODEX_BINARY_SUMMARY}" == "${CLAUDE_BINARY_SUMMARY}" ) ) ]]; then
               binary_input_ok=true
             fi
           else
@@ -2122,6 +2167,9 @@ jobs:
                 "${claude_ok}" == "true" && "${binary_input_ok}" == "true" &&
                 "${blocking_findings}" == "0" ]]; then
             heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+            if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+              heading='### ✅ ИИ-ревью Codex завершено без блокеров; Claude отключён'
+            fi
           elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" &&
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
             heading='### ✅ Ручное ревью Claude завершено без блокеров'
@@ -2172,6 +2220,9 @@ jobs:
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
               gate_state='success'
               gate_description='Оба ревью завершены без P0–P2'
+              if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+                gate_description='Codex завершён без P0–P2; Claude отключён'
+              fi
             else
               gate_state='failure'
               if [[ "${binary_input_ok}" != "true" ]]; then
