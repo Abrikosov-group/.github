@@ -92,6 +92,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: ""
         type: string
+      codex_model:
+        description: Основная модель Codex; Terra допускается только без профильного пула и резерва
+        required: false
+        default: gpt-5.3-codex-spark
+        type: string
       expected_claude_runner_name:
         description: Точное имя доверенного runner Claude
         required: true
@@ -161,6 +166,7 @@ env:
   REVIEW_DRAFTS: ${{ inputs.review_drafts }}
   DEEPSEEK_ENABLED: ${{ inputs.deepseek_enabled }}
   CLAUDE_ENABLED: ${{ inputs.claude_enabled }}
+  CODEX_REQUESTED_MODEL: ${{ inputs.codex_model }}
 
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
@@ -185,6 +191,7 @@ jobs:
       trigger: ${{ steps.pr.outputs.trigger }}
       mode: ${{ steps.pr.outputs.mode }}
       claude_model_label: ${{ steps.pr.outputs.claude_model_label }}
+      codex_model_label: ${{ steps.pr.outputs.codex_model_label }}
     env:
       GH_TOKEN: ${{ github.token }}
       CALLER_REPOSITORY: ${{ github.repository }}
@@ -204,6 +211,8 @@ jobs:
       TRUSTED_WORKFLOW_SHA: ${{ inputs.trusted_workflow_sha }}
       TRUSTED_AUTOMATIC_BOT_LOGINS: ${{ inputs.trusted_automatic_bot_logins }}
       CLAUDE_REVIEW_MODEL: ${{ inputs.claude_model }}
+      CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+      CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -245,6 +254,17 @@ jobs:
               exit 1
               ;;
           esac
+          case "${CODEX_REQUESTED_MODEL}" in
+            gpt-5.3-codex-spark) codex_model_label='GPT-5.3-Codex-Spark' ;;
+            gpt-5.6-terra) codex_model_label='GPT-5.6 Terra' ;;
+            *) echo "::error::Недопустимая основная модель Codex"; exit 1 ;;
+          esac
+          if [[ "${CODEX_REQUESTED_MODEL}" == 'gpt-5.6-terra' &&
+                ( "${CODEX_FALLBACK_ENABLED}" == 'true' ||
+                  -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ) ]]; then
+            echo "::error::Terra требует отключённый резерв и пустой codex_profile_root"
+            exit 1
+          fi
 
           case "${COMMAND}" in
             /review-all) mode="all" ;;
@@ -474,6 +494,7 @@ jobs:
             echo "trigger=${TRIGGER}"
             echo "mode=${mode}"
             echo "claude_model_label=${claude_model_label}"
+            echo "codex_model_label=${codex_model_label}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "### Зафиксирован снимок PR"
@@ -511,6 +532,7 @@ jobs:
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
       REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
       CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
+      CODEX_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -601,12 +623,12 @@ jobs:
 
           if [[ "${MODE}" == "all" ]]; then
             heading='### 🚀 Двойное ИИ-ревью запущено'
-            reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+            reviewers="- ⏳ ${CODEX_MODEL_LABEL} (\`xhigh\`) — запущен
           - ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
             if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
               heading='### 🚀 ИИ-ревью Codex запущено'
-              reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+              reviewers="- ⏳ ${CODEX_MODEL_LABEL} (\`xhigh\`) — запущен
           - ⏭ Claude — отключён (claude_enabled=false), ревью не выполняется"
               footer='_Этот комментарий обновится после завершения Codex._'
             fi
@@ -677,7 +699,7 @@ jobs:
           fi
 
   prepare-codex:
-    name: Подготовить безопасный вход для Codex Spark
+    name: Подготовить безопасный вход для Codex
     needs: [context, start-status]
     if: needs.context.outputs.mode == 'all'
     runs-on:
@@ -706,6 +728,7 @@ jobs:
       REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
       CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+      CODEX_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -807,6 +830,7 @@ jobs:
           {
             echo "binary_files=${binary_files}"
             echo "binary_manifest_sha256=${binary_manifest_sha256}"
+            echo "review_model=${CODEX_REQUESTED_MODEL}"
             echo 'binary_summary<<BINARY_SUMMARY_EOF'
             echo "${binary_summary}"
             echo 'BINARY_SUMMARY_EOF'
@@ -814,7 +838,7 @@ jobs:
 
           codex_needed=true
           if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
-            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
+            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:${CODEX_REQUESTED_MODEL} -->"
             fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
             coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
             reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
@@ -847,7 +871,7 @@ jobs:
                 add |
                 select(. <= 9007199254740991)
               ' <<< "${existing}")"; then
-                review_model='gpt-5.3-codex-spark'
+                review_model="${CODEX_REQUESTED_MODEL}"
                 if jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
                   review_model='gpt-5.6-sol'
                 fi
@@ -943,7 +967,7 @@ jobs:
             exit 1
           fi
           {
-            echo "### Вход Codex Spark"
+            echo "### Вход ${CODEX_MODEL_LABEL}"
             echo
             echo "- Текстовый diff: ${diff_size} байт"
             echo "- Manifest бинарных файлов: ${manifest_size} байт"
@@ -1965,6 +1989,7 @@ jobs:
       CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
       CODEX_REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
+      CODEX_REQUESTED_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
       CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
       CODEX_FALLBACK_USED: ${{ needs.analyze-codex.outputs.fallback_used }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
@@ -2067,7 +2092,7 @@ jobs:
             exit 1
           fi
 
-          codex_model_label='GPT-5.3-Codex-Spark'
+          codex_model_label="${CODEX_REQUESTED_MODEL_LABEL}"
           if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.6-sol" ]]; then
             codex_model_label='GPT-5.6 Sol'
           fi
@@ -2076,7 +2101,7 @@ jobs:
             codex_ok=true
             codex_line=""
           elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
+            codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — актуальное ревью уже существует"
@@ -2089,7 +2114,7 @@ jobs:
           fi
 
           if [[ "${CODEX_FALLBACK_USED:-false}" == "true" ]]; then
-            codex_line="${codex_line}; однократный резерв после технического сбоя Spark, обычная скорость"
+            codex_line="${codex_line}; однократный резерв после технического сбоя основной модели, обычная скорость"
           fi
 
           claude_ok=false

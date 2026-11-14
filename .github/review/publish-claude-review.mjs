@@ -39,6 +39,11 @@ const REVIEW_MODELS = new Map([
     marker: "codex-review",
     reviewer: "Codex",
   }],
+  ["gpt-5.6-terra", {
+    displayName: "GPT-5.6 Terra",
+    marker: "codex-review",
+    reviewer: "Codex",
+  }],
   ["gpt-5.3-codex-spark", {
     displayName: "GPT-5.3-Codex-Spark",
     marker: "codex-review",

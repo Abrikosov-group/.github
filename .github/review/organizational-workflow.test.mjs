@@ -110,6 +110,11 @@ function executeRunScript({
         CLAUDE_BINARY_MANIFEST_SHA256: emptyManifestHash,
         CLAUDE_REVIEW_MODEL: "claude-sonnet-5",
         CLAUDE_MODEL_LABEL: "Claude Sonnet 5",
+        CODEX_REQUESTED_MODEL: "gpt-5.3-codex-spark",
+        CODEX_MODEL_LABEL: "GPT-5.3-Codex-Spark",
+        CODEX_REQUESTED_MODEL_LABEL: "GPT-5.3-Codex-Spark",
+        CODEX_FALLBACK_ENABLED: "false",
+        CODEX_ACCOUNT_PROFILE_ROOT: "",
         EXECUTION_FILE: join(root, "execution.json"),
         REVIEW_ROOT: join(root, "review"),
         ...env,
@@ -655,7 +660,7 @@ test("Codex публикуется только после схемы и дов�
   assert.match(codexController, /"--output-schema", schemaPath/u);
   assert.match(codexController, /"--output-last-message", resultPath/u);
   assert.match(workflow, /REVIEW_JSON_FILE:/u);
-  assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:gpt-5\.3-codex-spark/u);
+  assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:\$\{CODEX_REQUESTED_MODEL\}/u);
   assert.match(workflow, /node _review_infra\/\.github\/review\/publish-claude-review\.mjs/u);
 });
 
@@ -768,6 +773,27 @@ test("Opus 5.5 принимается из доверенного caller, неи
   });
   assert.notEqual(rejected.status, 0);
   assert.equal(rejected.ghLog, "");
+});
+
+test("Terra принимается только без резерва и профильного пула", () => {
+  const run = changes => executeRunScript({
+    stepName: "Проверить источник запуска", ghMock: contextGhMock,
+    event: automaticEvent("b".repeat(40)),
+    env: contextEnv({ CODEX_REQUESTED_MODEL: "gpt-5.6-terra", EXPECTED_HEAD_SHA: "b".repeat(40),
+      MOCK_PR_JSON: prFixture(), ...changes }),
+  });
+  const accepted = run({});
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.outputs, /codex_model_label=GPT-5\.6 Terra/u);
+  for (const changes of [
+    { CODEX_FALLBACK_ENABLED: "true" },
+    { CODEX_ACCOUNT_PROFILE_ROOT: "/profiles" },
+    { CODEX_REQUESTED_MODEL: "unknown-model" },
+  ]) {
+    const rejected = run(changes);
+    assert.notEqual(rejected.status, 0);
+    assert.equal(rejected.ghLog, "");
+  }
 });
 
 test("Opus сохраняет только подтверждённую модель; Sonnet и отсутствующее подтверждение отклоняются", () => {
@@ -2289,7 +2315,7 @@ test("workflow сразу показывает запуск и обновляе�
   assert.match(startStatus, /Поставить 🚀 и опубликовать статус запуска/u);
   assert.match(startStatus, /--raw-field content='rocket'/u);
   assert.match(startStatus, /<!-- organizational-review-status -->/u);
-  assert.match(startStatus, /GPT-5\.3-Codex-Spark \(\\`xhigh\\`\) — запущен/u);
+  assert.match(startStatus, /\$\{CODEX_MODEL_LABEL\} \(\\`xhigh\\`\) — запущен/u);
   assert.match(startStatus, /\$\{CLAUDE_MODEL_LABEL\} \(\\`xhigh\\`\) — запущен/u);
   assert.match(startStatus, /echo "comment_id=\$\{comment_id\}"/u);
   assert.match(finishStatus, /always\(\)/u);
