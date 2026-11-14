@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 export const PRIMARY_MODEL = "gpt-5.3-codex-spark";
 export const FALLBACK_MODEL = "gpt-5.6-sol";
+export const TERRA_MODEL = "gpt-5.6-terra";
 export const PROFILE_IDS = ["account-1", "account-2", "account-3"];
 export const PROFILE_LOCK_BUSY_CODE = 75;
 export const DEFAULT_PROFILE_WAIT_MS = 10 * 60_000;
@@ -19,7 +20,7 @@ export const FALLBACK_JOB_TIMEOUT_MS = 45 * 60_000;
 export const PRIMARY_JOB_TIMEOUT_MS = 25 * 60_000;
 export const JOB_TIMEOUT_RESERVE_MS = 5 * 60_000;
 export const MIN_SLOT_TIMEOUT_MS = 3 * 60_000;
-const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL]);
+const MODELS = new Set([PRIMARY_MODEL, FALLBACK_MODEL, TERRA_MODEL]);
 
 export function defaultRoundBudgetMs(fallbackEnabled) {
   const jobTimeoutMs = fallbackEnabled ? FALLBACK_JOB_TIMEOUT_MS : PRIMARY_JOB_TIMEOUT_MS;
@@ -72,7 +73,8 @@ const DIAGNOSTIC_CATEGORIES = new Set([
   "provider_failure", "missing_report", "process_failed", "cli_configuration",
   "tls_failure", "profile_busy", "execution_failed",
 ]);
-const SLOT_IDS = new Set([...CODEX_SLOTS.map(({ slot }) => slot), "single-spark", "single-sol"]);
+const SLOT_IDS = new Set(CODEX_SLOTS.map(({ slot }) => slot)
+  .concat("single-spark", "single-sol", "single-terra"));
 
 // round.json is read back from disk after a failure, so treat even its strings as
 // untrusted. Only fixed identifiers are allowed into the CI log; never print a
@@ -167,9 +169,9 @@ export function fallbackReason({ code, signal, events, reportPresent, timedOut, 
   for (const e of lastError ? [lastError] : []) {
     const message = `${e.code ?? e.type ?? ""} ${e.message ?? ""}`;
     if (accountLimit(e)) return "account_limit";
-    if (modelLimit(e)) return model === PRIMARY_MODEL ? "primary_model_limit" : "model_limit";
+    if (modelLimit(e)) return [PRIMARY_MODEL, TERRA_MODEL].includes(model) ? "primary_model_limit" : "model_limit";
     if (message.includes(model) && /not supported|not available|does not exist|model.not.found/iu.test(message)) {
-      return model === PRIMARY_MODEL ? "primary_model_unavailable" : "model_unavailable";
+      return [PRIMARY_MODEL, TERRA_MODEL].includes(model) ? "primary_model_unavailable" : "model_unavailable";
     }
     if (/server_error|internal_server_error|service_unavailable|connection_reset|connection_error/iu.test(message)
       || [500, 502, 503, 504].includes(e.status)) return "provider_technical_failure";
@@ -284,6 +286,12 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
   now = () => Date.now(), roundBudgetMs = null, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS }) {
   validateSnapshot(snapshot);
   if (!MODELS.has(primaryModel)) throw new Error("Недопустимая основная модель.");
+  if (primaryModel === TERRA_MODEL && fallbackEnabled) {
+    throw new Error("Для модели Terra автоматический резерв Sol не разрешён.");
+  }
+  if (primaryModel === TERRA_MODEL && profileRoot) {
+    throw new Error("Профильный пул Codex пока не поддерживает Terra.");
+  }
   const budgetMs = roundBudgetMs === null ? defaultRoundBudgetMs(fallbackEnabled)
     : Math.max(0, Number(roundBudgetMs) || 0);
   root = resolve(root);
@@ -315,11 +323,11 @@ export async function runRound({ root, snapshot, fallbackEnabled, currentPR,
     if (signal.aborted) throw new Error("Раунд отменён.");
   };
   const availableSlots = profileRoot
-    ? (primaryModel === PRIMARY_MODEL
-      ? CODEX_SLOTS
+    ? (primaryModel === PRIMARY_MODEL ? CODEX_SLOTS
       : CODEX_SLOTS.filter(slot => slot.model === FALLBACK_MODEL))
-    : [{ slot: primaryModel === PRIMARY_MODEL ? "single-spark" : "single-sol", profileId: null, model: primaryModel },
-      ...(primaryModel === PRIMARY_MODEL ? [{ slot: "single-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
+    : [{ slot: primaryModel === PRIMARY_MODEL ? "single-spark"
+      : primaryModel === TERRA_MODEL ? "single-terra" : "single-sol", profileId: null, model: primaryModel },
+    ...(primaryModel === PRIMARY_MODEL ? [{ slot: "single-sol", profileId: null, model: FALLBACK_MODEL }] : [])];
   const attempt = async ({ model, profileId, slot }, reason, timeoutMs) => {
     await guard();
     const id = randomUUID();

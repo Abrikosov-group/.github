@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { assertCurrentPR, attemptDiagnostic, codexInvocation, defaultRoundBudgetMs, executeCodex, fallbackReason, roundFailureSummary, runRound,
   slotTimeoutMs, DEFAULT_ATTEMPT_TIMEOUT_MS, FALLBACK_JOB_TIMEOUT_MS, JOB_TIMEOUT_RESERVE_MS, MIN_SLOT_TIMEOUT_MS,
-  PRIMARY_JOB_TIMEOUT_MS, PRIMARY_MODEL, FALLBACK_MODEL, PROFILE_LOCK_BUSY_CODE } from "./run-codex-review.mjs";
+  PRIMARY_JOB_TIMEOUT_MS, PRIMARY_MODEL, FALLBACK_MODEL, TERRA_MODEL, PROFILE_LOCK_BUSY_CODE } from "./run-codex-review.mjs";
 
 const snapshot = { repository: "example/repo", pr: 1, base: "a".repeat(40), head: "b".repeat(40), runId: "12", runAttempt: 1 };
 const unavailable = { code: 1, events: JSON.stringify({ type: "error", message: `The '${PRIMARY_MODEL}' model is not supported when using Codex with a ChatGPT account.` }) };
@@ -96,6 +96,40 @@ test("a negative primary report is accepted without a replacement review", async
   assert.equal(audit.fallbackReserved, false);
   assert.equal(h.calls.length, 1);
   assert.deepEqual(JSON.parse(await readFile(join(h.root, "output/review.json"), "utf8")).findings, findings);
+});
+
+test("Terra runs once in the single account without a Sol fallback", async t => {
+  const h = await harness(t);
+  const audit = await runRound({ ...h.options, primaryModel: TERRA_MODEL,
+    fallbackEnabled: false, execute: h.success });
+  assert.deepEqual(h.calls.map(({ model, slot, profileId }) => ({ model, slot, profileId })),
+    [{ model: TERRA_MODEL, slot: "single-terra", profileId: null }]);
+  assert.equal(audit.acceptedModel, TERRA_MODEL);
+  assert.equal(audit.fallbackReserved, false);
+});
+
+test("Terra rejects fallback and profile pools before creating a round", async t => {
+  const h = await harness(t);
+  await assert.rejects(runRound({ ...h.options, primaryModel: TERRA_MODEL,
+    execute: h.success }), /резерв Sol/u);
+  await assert.rejects(runRound({ ...h.options, primaryModel: TERRA_MODEL,
+    fallbackEnabled: false, profileRoot: "/profiles", execute: h.success }), /не поддерживает Terra/u);
+  assert.equal(h.calls.length, 0);
+});
+
+test("unavailable Terra fails with one attempt and preserves the primary reason", async t => {
+  const h = await harness(t);
+  await assert.rejects(runRound({ ...h.options, primaryModel: TERRA_MODEL,
+    fallbackEnabled: false, execute: async request => {
+      h.calls.push(request);
+      return { code: 1, events: JSON.stringify({ type: "error",
+        message: `The '${TERRA_MODEL}' model is not supported.` }) };
+    } }));
+  assert.deepEqual(h.calls.map(({ model }) => model), [TERRA_MODEL]);
+  const audit = await h.audit();
+  assert.equal(audit.attempts[0].diagnostic.category, "model_unavailable");
+  assert.equal(audit.failure, "primary_model_unavailable");
+  assert.equal(audit.fallbackReserved, false);
 });
 
 test("timeout followed by a graceful zero exit still reserves one fallback", async t => {
