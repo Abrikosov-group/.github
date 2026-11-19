@@ -20,7 +20,7 @@ const organizationCaller = readFileSync(".github/workflows/review-all-trigger.ym
 const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
-const organizationWorkflowSha = "b2b7c1222fbacb3889b841ea60f233f932f81482";
+const organizationWorkflowSha = "4061fd546bd52095d1b1556df44244b231580b15";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -581,6 +581,7 @@ test("центральный caller передаёт полный контрак
     "expected_codex_runner_name: sawabook-review-codex-179-198-117-215",
     "expected_claude_runner_name: sawabook-review-claude-179-198-117-215",
     "trusted_workflow_repository: Abrikosov-group/.github",
+    "claude_enabled: false",
     "claude_model: claude-opus-5-5",
     `trusted_workflow_sha: ${organizationWorkflowSha}`,
     "codex_fallback_enabled: true",
@@ -593,6 +594,7 @@ test("центральный caller передаёт полный контрак
     for (const input of expectedInputs) {
       assert.ok(job.includes(`      ${input}`), `${jobId}: отсутствует ${input}`);
     }
+    assert.doesNotMatch(job, /CLAUDE_CODE_OAUTH_TOKEN|secrets:\s*inherit/u);
     assert.ok(job.includes('      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}'));
   }
 
@@ -1023,7 +1025,7 @@ test("публикация Claude получает вход и результа�
   assert.doesNotMatch(analyzeJob, /review_json: \$\{\{ steps\.claude\.outputs\.structured_output \}\}/u);
   assert.match(
     publishJob,
-    /if: needs\.analyze-claude\.outputs\.review_needed == 'true'/u,
+    /if: inputs\.claude_enabled && needs\.analyze-claude\.outputs\.review_needed == 'true'/u,
   );
   assert.match(publishJob, /name: claude-review-input/u);
   assert.match(publishJob, /name: claude-review-output/u);
@@ -2443,4 +2445,66 @@ test("итог показывает Sol и различает техническ
   assert.equal(findings.status, 0, findings.stderr);
   assert.match(findings.ghLog, /state=failure/u);
   assert.match(findings.ghLog, /Найдены замечания P0–P2/u);
+});
+
+test("Claude включён по умолчанию; отключение исключает модель и OAuth", () => {
+  assert.match(workflow, /claude_enabled:\n\s+description: [^\n]+\n\s+required: false\n\s+default: true\n\s+type: boolean/u);
+  assert.match(workflow, /CLAUDE_CODE_OAUTH_TOKEN:\n\s+description: [^\n]+\n\s+required: false/u);
+  assert.match(extractJob(workflow, "analyze-claude"), /\n    if: inputs\.claude_enabled\n/u);
+  assert.match(extractJob(workflow, "publish-claude"), /\n    if: inputs\.claude_enabled && /u);
+  for (const token of ["", "test-oauth"]) {
+    const result = executeRunScript({ stepName: "Проверить OAuth включённого Claude", ghMock: contextGhMock,
+      env: { CLAUDE_CODE_OAUTH_TOKEN: token } });
+    assert.equal(result.status === 0, token !== "", result.stdout + result.stderr);
+  }
+  const start = executeRunScript({ stepName: "Поставить 🚀 и опубликовать статус запуска", ghMock: statusGhMock,
+    env: statusEnv({ CLAUDE_ENABLED: "false", REVIEW_GATE_CONTEXT: "ИИ-ревью" }) });
+  assert.equal(start.status, 0, start.stderr);
+  assert.match(start.ghLog, /Claude — отключён/u);
+  assert.doesNotMatch(start.ghLog, /Claude.*— запущен|Двойное ИИ-ревью запущено/u);
+});
+test("review-claude при отключённой роли отклоняется после проверки автора и PR", () => {
+  const comment = JSON.parse(commandCommentFixture());
+  comment.body = "/review-claude";
+  for (const enabled of ["false", "true"]) {
+    const result = executeRunScript({ stepName: "Проверить источник запуска", ghMock: contextGhMock,
+      env: contextEnv({ TRIGGER: "manual", EVENT_NAME: "issue_comment", EVENT_ACTION: "created",
+        COMMENT_ID: "91", AUTHOR_ASSOCIATION: "MEMBER", COMMAND: comment.body, CLAUDE_ENABLED: enabled,
+        MOCK_COMMENT_JSON: JSON.stringify(comment), MOCK_PR_JSON: prFixture() }) });
+    assert.equal(result.status === 0, enabled === "true", result.stdout + result.stderr);
+    if (enabled === "false") {
+      assert.match(result.summary, /Claude отключён.*review-claude не выполнялась/u);
+    }
+  }
+});
+test("Codex без Claude: публикация и reuse успешны, сбои и потеря снимка не дают зелёный gate", () => {
+  const common = { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", STATUS_COMMENT_ID: "99",
+    BASE_SHA: "a".repeat(40), HEAD_SHA: "b".repeat(40), MODE: "all", CLAUDE_ENABLED: "false",
+    RUN_URL: "https://github.com/Abrikosov-group/project/actions/runs/1", REVIEW_GATE_CONTEXT: "ИИ-ревью",
+    CODEX_PREPARE_RESULT: "success", CODEX_REVIEW_NEEDED: "true", CODEX_ANALYZE_RESULT: "success",
+    CODEX_PUBLISH_RESULT: "success", CODEX_PUBLISHED_BLOCKING_FINDINGS: "0",
+    CLAUDE_ANALYZE_RESULT: "skipped", CLAUDE_REVIEW_NEEDED: "", CLAUDE_PUBLISH_RESULT: "skipped",
+    CLAUDE_BINARY_MANIFEST_SHA256: "", CLAUDE_BINARY_FILES: "", CLAUDE_BINARY_SUMMARY: "",
+    CLAUDE_PUBLISHED_BLOCKING_FINDINGS: "", CLAUDE_REUSED_BLOCKING_FINDINGS: "" };
+  const run = changes => executeRunScript({ stepName: "Показать результат обоих ревьюеров",
+    ghMock: finishStatusGhMock, env: { ...common, ...changes } });
+  for (const changes of [{}, { CODEX_REVIEW_NEEDED: "false", CODEX_ANALYZE_RESULT: "skipped",
+    CODEX_PUBLISH_RESULT: "skipped", CODEX_REUSED_BLOCKING_FINDINGS: "0" }]) {
+    const result = run(changes);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.ghLog, /state=success/u);
+    assert.match(result.ghLog, /Claude — отключён.*ревью не выполнялось/u);
+    assert.doesNotMatch(result.ghLog, /✅ Claude|Оба ревью|Двойное ИИ-ревью завершено/u);
+  }
+  for (const changes of [
+    { CODEX_PREPARE_RESULT: "failure" }, { CODEX_ANALYZE_RESULT: "failure" },
+    { CODEX_ANALYZE_RESULT: "cancelled" }, { CODEX_PUBLISH_RESULT: "skipped" },
+    { CODEX_PUBLISHED_BLOCKING_FINDINGS: "1" }, { CODEX_PUBLISHED_BLOCKING_FINDINGS: "" },
+    { CODEX_BINARY_MANIFEST_SHA256: "" }, { CLAUDE_ENABLED: "true" },
+    { MOCK_CURRENT_HEAD_SHA: "c".repeat(40) }, { MOCK_PR_CHANGE_AFTER_READS: "2" },
+  ]) {
+    const result = run(changes);
+    assert.match(result.ghLog, /state=failure/u, JSON.stringify({ changes, stderr: result.stderr }));
+    assert.doesNotMatch(result.ghLog, /state=success/u);
+  }
 });
