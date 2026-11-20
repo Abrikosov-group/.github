@@ -463,6 +463,16 @@ test("создаёт отдельное русское ревью GPT-5.3-Codex-
   assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
 });
 
+test("Terra публикуется как отдельная модель без маркера резерва Sol", () => {
+  const model = "gpt-5.6-terra";
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, model);
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, model);
+  assert.ok(payload.body.startsWith(marker));
+  assert.match(payload.body, /GPT-5\.6 Terra, усилие `xhigh`/u);
+  assert.doesNotMatch(payload.body, /codex-fallback-profile/u);
+  assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, SPARK_MODEL));
+});
+
 test("резерв публикуется как Sol и переиспользуется только с согласованным профилем", async () => {
   const model = "gpt-5.6-sol";
   const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, model);
