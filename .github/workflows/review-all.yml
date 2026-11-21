@@ -92,6 +92,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: ""
         type: string
+      codex_model:
+        description: Основная модель Codex. Terra используется в профиле Академии
+        required: false
+        default: gpt-5.3-codex-spark
+        type: string
       expected_claude_runner_name:
         description: Точное имя доверенного runner Claude
         required: true
@@ -101,6 +106,11 @@ name: Организационное двойное ИИ-ревью
         required: false
         default: claude-sonnet-5
         type: string
+      claude_enabled:
+        description: Выполнять независимое ревью Claude. Отключение разрешено только для профиля Академии
+        required: false
+        default: true
+        type: boolean
       reuse_existing_reviews:
         description: Не запускать модель повторно, если для SHA уже есть ревью
         required: false
@@ -144,8 +154,8 @@ name: Организационное двойное ИИ-ревью
         description: Устаревший совместимый секрет; новое ревью его не использует
         required: false
       CLAUDE_CODE_OAUTH_TOKEN:
-        description: Подписочный OAuth-токен Claude Code
-        required: true
+        description: Подписочный OAuth-токен Claude Code; нужен при claude_enabled=true
+        required: false
       REVIEW_GATE_APP_PRIVATE_KEY:
         description: Private key GitHub App доверенного издателя
         required: false
@@ -155,6 +165,8 @@ permissions: {}
 env:
   REVIEW_DRAFTS: ${{ inputs.review_drafts }}
   DEEPSEEK_ENABLED: ${{ inputs.deepseek_enabled }}
+  CLAUDE_ENABLED: ${{ inputs.claude_enabled }}
+  CODEX_REQUESTED_MODEL: ${{ inputs.codex_model }}
 
 concurrency:
   group: organizational-review-engine-${{ inputs.repository }}-${{ inputs.pr_number }}
@@ -178,7 +190,9 @@ jobs:
       head_sha: ${{ steps.pr.outputs.head_sha }}
       trigger: ${{ steps.pr.outputs.trigger }}
       mode: ${{ steps.pr.outputs.mode }}
+      profile_check: ${{ steps.pr.outputs.profile_check }}
       claude_model_label: ${{ steps.pr.outputs.claude_model_label }}
+      codex_model_label: ${{ steps.pr.outputs.codex_model_label }}
     env:
       GH_TOKEN: ${{ github.token }}
       CALLER_REPOSITORY: ${{ github.repository }}
@@ -198,6 +212,8 @@ jobs:
       TRUSTED_WORKFLOW_SHA: ${{ inputs.trusted_workflow_sha }}
       TRUSTED_AUTOMATIC_BOT_LOGINS: ${{ inputs.trusted_automatic_bot_logins }}
       CLAUDE_REVIEW_MODEL: ${{ inputs.claude_model }}
+      CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+      CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -239,7 +255,11 @@ jobs:
               exit 1
               ;;
           esac
-
+          case "${CODEX_REQUESTED_MODEL}" in
+            gpt-5.3-codex-spark) codex_model_label='GPT-5.3-Codex-Spark' ;;
+            gpt-5.6-terra) codex_model_label='GPT-5.6 Terra' ;;
+            *) echo "::error::Недопустимая основная модель Codex"; exit 1 ;;
+          esac
           case "${COMMAND}" in
             /review-all) mode="all" ;;
             /review-claude) mode="claude" ;;
@@ -454,13 +474,37 @@ jobs:
             echo "::notice::Событие относится к ${EXPECTED_HEAD_SHA}, выбран текущий Head ${head_sha}"
           fi
 
+          profile_check=ok
+          if [[ "${REPOSITORY}" == 'Abrikosov-group/abrikosoff-academy' ]]; then
+            if [[ "${CODEX_REQUESTED_MODEL}" != 'gpt-5.6-terra' ||
+                  "${CODEX_FALLBACK_ENABLED}" != 'false' || -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ||
+                  "${CLAUDE_ENABLED:-true}" != 'false' || "${DEEPSEEK_ENABLED:-false}" != 'false' ]]; then
+              profile_check='Академии требуется Terra без резерва, пула профилей и дополнительных моделей'
+            fi
+          elif [[ "${CLAUDE_ENABLED:-true}" != 'true' ]]; then
+            profile_check='Для этого репозитория требуется независимое ревью Claude'
+          elif [[ "${REPOSITORY}" == 'Abrikosov-group/sawabook' && "${CLAUDE_REVIEW_MODEL}" != 'claude-opus-5-5' ]]; then
+            profile_check='Для Sawabook требуется Claude Opus 5.5'
+          elif [[ "${CODEX_REQUESTED_MODEL}" == 'gpt-5.6-terra' ]]; then
+            profile_check='Профиль Terra разрешён только для Академии'
+          fi
+
+          if [[ "${profile_check}" == "ok" && "${mode}" == "claude" && "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+            message='Claude отключён (claude_enabled=false); /review-claude не выполнялась. Используйте /review-all для ревью Codex.'
+            echo "::error::${message}"
+            echo "### ${message}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
           {
             echo "base_ref=${base_ref}"
             echo "base_sha=${base_sha}"
             echo "head_sha=${head_sha}"
             echo "trigger=${TRIGGER}"
             echo "mode=${mode}"
+            echo "profile_check=${profile_check}"
             echo "claude_model_label=${claude_model_label}"
+            echo "codex_model_label=${codex_model_label}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "### Зафиксирован снимок PR"
@@ -498,6 +542,7 @@ jobs:
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
       REVIEW_GATE_CONTEXT: ${{ inputs.review_gate_context }}
       CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
+      CODEX_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -588,9 +633,15 @@ jobs:
 
           if [[ "${MODE}" == "all" ]]; then
             heading='### 🚀 Двойное ИИ-ревью запущено'
-            reviewers="- ⏳ GPT-5.3-Codex-Spark (\`xhigh\`) — запущен
+            reviewers="- ⏳ ${CODEX_MODEL_LABEL} (\`xhigh\`) — запущен
           - ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
             footer='_Этот комментарий обновится после завершения обоих ревьюеров._'
+            if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+              heading='### 🚀 ИИ-ревью Codex запущено'
+              reviewers="- ⏳ ${CODEX_MODEL_LABEL} (\`xhigh\`) — запущен
+          - ⏭ Claude — отключён (claude_enabled=false), ревью не выполняется"
+              footer='_Этот комментарий обновится после завершения Codex._'
+            fi
           else
             heading='### 🚀 Ревью Claude запущено вручную'
             reviewers="- ⏳ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — запущен"
@@ -645,18 +696,22 @@ jobs:
           echo "comment_id=${comment_id}" >> "${GITHUB_OUTPUT}"
 
           if [[ "${MODE}" == "all" && -n "${REVIEW_GATE_CONTEXT}" ]]; then
+            gate_description='Codex и Claude проверяют текущий commit'
+            if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+              gate_description='Codex проверяет текущий commit; Claude отключён'
+            fi
             gh api --method POST \
               "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
               --raw-field state='pending' \
               --raw-field context="${REVIEW_GATE_CONTEXT}" \
-              --raw-field description='Codex и Claude проверяют текущий commit' \
+              --raw-field description="${gate_description}" \
               --raw-field target_url="${RUN_URL}" > /dev/null
           fi
 
   prepare-codex:
-    name: Подготовить безопасный вход для Codex Spark
+    name: Подготовить безопасный вход для Codex
     needs: [context, start-status]
-    if: needs.context.outputs.mode == 'all'
+    if: needs.context.outputs.mode == 'all' && needs.context.outputs.profile_check == 'ok'
     runs-on:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.orchestration_runner_label }}
@@ -683,6 +738,7 @@ jobs:
       REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
       REUSE_EXISTING_REVIEWS: ${{ inputs.reuse_existing_reviews }}
       CODEX_FALLBACK_ENABLED: ${{ inputs.codex_fallback_enabled }}
+      CODEX_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
 
     steps:
       - name: Проверить доверенный Runner оркестрации
@@ -705,13 +761,9 @@ jobs:
           persist-credentials: false
 
       - name: Получить доверенную утилиту подготовки входа
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Проверить дубликат и подготовить вход модели
         id: input
@@ -752,7 +804,7 @@ jobs:
           input_dir="${GITHUB_WORKSPACE}/.review-input/codex"
           mkdir -p "${input_dir}"
           preparation="$(node \
-            "${GITHUB_WORKSPACE}/_review_infra/.github/review/prepare-codex-input.mjs" \
+            "${REVIEW_TOOLS_DIR}/prepare-codex-input.mjs" \
             --base-sha "${BASE_SHA}" \
             --merge-base-sha "${merge_base}" \
             --head-sha "${HEAD_SHA}" \
@@ -784,6 +836,7 @@ jobs:
           {
             echo "binary_files=${binary_files}"
             echo "binary_manifest_sha256=${binary_manifest_sha256}"
+            echo "review_model=${CODEX_REQUESTED_MODEL}"
             echo 'binary_summary<<BINARY_SUMMARY_EOF'
             echo "${binary_summary}"
             echo 'BINARY_SUMMARY_EOF'
@@ -791,7 +844,7 @@ jobs:
 
           codex_needed=true
           if [[ "${TRIGGER}" != "manual" && "${REUSE_EXISTING_REVIEWS}" == "true" ]]; then
-            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.3-codex-spark -->"
+            marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:${CODEX_REQUESTED_MODEL} -->"
             fallback_marker="<!-- codex-review:${BASE_SHA}:${HEAD_SHA}:gpt-5.6-sol -->"
             coverage_marker="<!-- review-binary-coverage:sha256=${binary_manifest_sha256};files=${binary_files} -->"
             reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
@@ -802,7 +855,7 @@ jobs:
               --arg coverage_marker "${coverage_marker}" \
               --arg login "${REVIEW_PUBLISHER_LOGIN}" \
               '[.[][]? | select(
-                .user.login == $login and
+                .user.login == $login and .commit_id == env.HEAD_SHA and
                 (((.body // "") | contains($marker)) or
                   ($fallback_enabled == "true" and
                    ((.body // "") | contains($fallback_marker)) and
@@ -824,7 +877,7 @@ jobs:
                 add |
                 select(. <= 9007199254740991)
               ' <<< "${existing}")"; then
-                review_model='gpt-5.3-codex-spark'
+                review_model="${CODEX_REQUESTED_MODEL}"
                 if jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
                   review_model='gpt-5.6-sol'
                 fi
@@ -920,7 +973,7 @@ jobs:
             exit 1
           fi
           {
-            echo "### Вход Codex Spark"
+            echo "### Вход ${CODEX_MODEL_LABEL}"
             echo
             echo "- Текстовый diff: ${diff_size} байт"
             echo "- Manifest бинарных файлов: ${manifest_size} байт"
@@ -944,9 +997,9 @@ jobs:
           CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
         run: |
           set -euo pipefail
-          cp _review_infra/.github/review/run-codex-review.mjs .review-input/codex/run-codex-review.mjs
+          cp "${REVIEW_TOOLS_DIR}/run-codex-review.mjs" .review-input/codex/run-codex-review.mjs
           if [[ -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ]]; then
-            cp _review_infra/.github/review/codex-account-diagnostic.mjs .review-input/codex/codex-account-diagnostic.mjs
+            cp "${REVIEW_TOOLS_DIR}/codex-account-diagnostic.mjs" .review-input/codex/codex-account-diagnostic.mjs
           fi
 
       - name: Передать обезличенный вход ревью на защищённый Runner
@@ -987,12 +1040,9 @@ jobs:
           test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
 
       - name: Получить доверенный контроллер DeepSeek
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
       - name: Подготовить Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1015,7 +1065,7 @@ jobs:
           FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
         run: |
           mkdir -p .review-output
-          node _review_infra/.github/review/run-deepseek-review.mjs --kind c3 --github --input .review-input/codex --output .review-output/deepseek
+          node "${REVIEW_TOOLS_DIR}/run-deepseek-review.mjs" --kind c3 --github --input .review-input/codex --output .review-output/deepseek
       - name: Сохранить отдельный результат и диагностику DeepSeek
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -1055,12 +1105,9 @@ jobs:
           test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
 
       - name: Получить доверенный издатель DeepSeek
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
       - name: Подготовить Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1093,7 +1140,7 @@ jobs:
           DEEPSEEK_OUTPUT: ${{ github.workspace }}/.review-output/deepseek
           REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
           FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
-        run: node _review_infra/.github/review/publish-deepseek-review.mjs
+        run: node "${REVIEW_TOOLS_DIR}/publish-deepseek-review.mjs"
 
   analyze-codex:
     name: Проанализировать PR с Codex и разрешённым резервом
@@ -1288,13 +1335,9 @@ jobs:
           path: .review-output/codex
 
       - name: Получить доверенный издатель версии workflow
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Опубликовать атомарное ревью Codex
         id: publish
@@ -1312,12 +1355,13 @@ jobs:
           REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
         run: |
           set -euo pipefail
-          node _review_infra/.github/review/publish-claude-review.mjs
+          node "${REVIEW_TOOLS_DIR}/publish-claude-review.mjs"
 
 
   analyze-claude:
     name: Проанализировать PR с Claude
     needs: [context, start-status]
+    if: inputs.claude_enabled && needs.context.outputs.profile_check == 'ok'
     runs-on:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.claude_runner_label }}
@@ -1350,6 +1394,17 @@ jobs:
           test "${RUNNER_ARCH}" = X64
           test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
 
+      - name: Проверить OAuth включённого Claude
+        shell: bash
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]]; then
+            echo '::error::Для claude_enabled=true требуется CLAUDE_CODE_OAUTH_TOKEN'
+            exit 1
+          fi
+
       - name: Получить точный Base в защищённый корень
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1370,13 +1425,9 @@ jobs:
           fi
 
       - name: Получить доверенную утилиту подготовки входа
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Подготовить безопасный вход
         id: input
@@ -1418,7 +1469,7 @@ jobs:
           input_dir="${GITHUB_WORKSPACE}/.review-input"
           mkdir -p "${input_dir}"
           preparation="$(node \
-            "${GITHUB_WORKSPACE}/_review_infra/.github/review/prepare-codex-input.mjs" \
+            "${REVIEW_TOOLS_DIR}/prepare-codex-input.mjs" \
             --base-sha "${BASE_SHA}" \
             --merge-base-sha "${merge_base}" \
             --head-sha "${HEAD_SHA}" \
@@ -1497,8 +1548,10 @@ jobs:
           reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
           existing="$(jq -c --arg marker "${marker}" --arg coverage_marker "${coverage_marker}" --arg login "${REVIEW_PUBLISHER_LOGIN}" \
             '[.[][]? | select(
-              .user.login == $login and
-              (.body // "" | contains($marker)) and
+              .user.login == $login and .commit_id == env.HEAD_SHA and
+              (.body // "" | startswith($marker + "\n")) and
+              (env.CLAUDE_REVIEW_MODEL != "claude-opus-5-5" or
+                (.body // "" | startswith($marker + "\n<!-- claude-profile:opus-5-5-xhigh-standard-v1 -->\n"))) and
               (.body // "" | contains($coverage_marker))
             )] | sort_by(.id) | last // null' \
             <<< "${reviews}")"
@@ -1667,7 +1720,7 @@ jobs:
           CLAUDE_DIAGNOSTIC_FILE: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/diagnostic/failure.json
         run: |
           set -euo pipefail
-          node _review_infra/.github/review/claude-failure-diagnostic.mjs
+          node "${REVIEW_TOOLS_DIR}/claude-failure-diagnostic.mjs"
 
       - name: Сохранить диагностику сбоя Claude в артефакт
         if: always() && steps.claude.outcome == 'failure'
@@ -1739,7 +1792,7 @@ jobs:
   publish-claude:
     name: Опубликовать проверенное ревью Claude
     needs: [context, start-status, analyze-claude]
-    if: needs.analyze-claude.outputs.review_needed == 'true'
+    if: inputs.claude_enabled && needs.analyze-claude.outputs.review_needed == 'true'
     runs-on:
       group: ${{ inputs.review_runner_group }}
       labels: ${{ inputs.orchestration_runner_label }}
@@ -1779,13 +1832,9 @@ jobs:
           persist-credentials: false
 
       - name: Получить доверенные утилиты из организации
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Получить вход, который анализировал Claude
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -1843,7 +1892,7 @@ jobs:
           trusted_input_dir="${GITHUB_WORKSPACE}/.review-input/trusted"
           mkdir -p "${trusted_input_dir}"
           node \
-            "${GITHUB_WORKSPACE}/_review_infra/.github/review/prepare-codex-input.mjs" \
+            "${REVIEW_TOOLS_DIR}/prepare-codex-input.mjs" \
             --base-sha "${BASE_SHA}" \
             --merge-base-sha "${merge_base}" \
             --head-sha "${HEAD_SHA}" \
@@ -1893,7 +1942,7 @@ jobs:
               .requested_effort == "xhigh" and .fast == false and .automatic_fallback == false
             ' "${REVIEW_PROFILE_FILE}" > /dev/null
           fi
-          node _review_infra/.github/review/publish-claude-review.mjs
+          node "${REVIEW_TOOLS_DIR}/publish-claude-review.mjs"
 
 
   finish-status:
@@ -1930,6 +1979,8 @@ jobs:
       CODEX_REVIEW_NEEDED: ${{ needs.prepare-codex.outputs.review_needed }}
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
       CODEX_REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
+      CODEX_REQUESTED_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
+      PROFILE_CHECK: ${{ needs.context.outputs.profile_check }}
       CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
       CODEX_FALLBACK_USED: ${{ needs.analyze-codex.outputs.fallback_used }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
@@ -2032,7 +2083,7 @@ jobs:
             exit 1
           fi
 
-          codex_model_label='GPT-5.3-Codex-Spark'
+          codex_model_label="${CODEX_REQUESTED_MODEL_LABEL}"
           if [[ "${CODEX_REVIEW_MODEL:-}" == "gpt-5.6-sol" ]]; then
             codex_model_label='GPT-5.6 Sol'
           fi
@@ -2041,7 +2092,7 @@ jobs:
             codex_ok=true
             codex_line=""
           elif [[ "${CODEX_PREPARE_RESULT}" != "success" ]]; then
-            codex_line="- ❌ GPT-5.3-Codex-Spark (\`xhigh\`) — подготовка завершилась ошибкой"
+            codex_line="- ❌ ${codex_model_label} (\`xhigh\`) — подготовка завершилась ошибкой"
           elif [[ "${CODEX_REVIEW_NEEDED}" == "false" ]]; then
             codex_ok=true
             codex_line="- ✅ ${codex_model_label} (\`xhigh\`) — актуальное ревью уже существует"
@@ -2054,11 +2105,16 @@ jobs:
           fi
 
           if [[ "${CODEX_FALLBACK_USED:-false}" == "true" ]]; then
-            codex_line="${codex_line}; однократный резерв после технического сбоя Spark, обычная скорость"
+            codex_line="${codex_line}; однократный резерв после технического сбоя основной модели, обычная скорость"
           fi
 
           claude_ok=false
-          if [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
+          if [[ "${PROFILE_CHECK:-}" != "ok" ]]; then
+            claude_line="- ❌ ${PROFILE_CHECK:-Не удалось подтвердить профиль ревью}"
+          elif [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+            claude_ok=true
+            claude_line='- ⏭ Claude — отключён (claude_enabled=false), ревью не выполнялось'
+          elif [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
             claude_line="- ❌ ${CLAUDE_MODEL_LABEL} (\`xhigh\`) — анализ завершился ошибкой"
           elif [[ "${CLAUDE_REVIEW_NEEDED}" == "false" ]]; then
             claude_ok=true
@@ -2077,18 +2133,24 @@ jobs:
             else
               codex_count="${CODEX_REUSED_BLOCKING_FINDINGS}"
             fi
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] || codex_ok=false
-            [[ "${codex_count}" =~ ^[0-9]+$ ]] &&
+            if [[ "${codex_count}" =~ ^[0-9]+$ ]]; then
               blocking_findings=$((blocking_findings + codex_count))
+            else
+              codex_ok=false
+            fi
           fi
-          if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
-            claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
-          else
-            claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+          if [[ "${CLAUDE_ENABLED:-true}" != "false" ]]; then
+            if [[ "${CLAUDE_REVIEW_NEEDED}" == "true" ]]; then
+              claude_count="${CLAUDE_PUBLISHED_BLOCKING_FINDINGS}"
+            else
+              claude_count="${CLAUDE_REUSED_BLOCKING_FINDINGS}"
+            fi
+            if [[ "${claude_count}" =~ ^[0-9]+$ ]]; then
+              blocking_findings=$((blocking_findings + claude_count))
+            else
+              claude_ok=false
+            fi
           fi
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] || claude_ok=false
-          [[ "${claude_count}" =~ ^[0-9]+$ ]] &&
-            blocking_findings=$((blocking_findings + claude_count))
 
           binary_input_ok=false
           if [[ "${MODE}" == "all" ]]; then
@@ -2096,10 +2158,11 @@ jobs:
             binary_files="${CODEX_BINARY_FILES}"
             if [[ "${#CODEX_BINARY_MANIFEST_SHA256}" -eq 64 &&
                   "${CODEX_BINARY_MANIFEST_SHA256}" =~ ^[0-9a-f]+$ &&
-                  "${CODEX_BINARY_MANIFEST_SHA256}" == "${CLAUDE_BINARY_MANIFEST_SHA256}" &&
                   "${CODEX_BINARY_FILES}" =~ ^[0-9]+$ &&
-                  "${CODEX_BINARY_FILES}" == "${CLAUDE_BINARY_FILES}" &&
-                  "${CODEX_BINARY_SUMMARY}" == "${CLAUDE_BINARY_SUMMARY}" ]]; then
+                  ( "${CLAUDE_ENABLED:-true}" == "false" ||
+                    ( "${CODEX_BINARY_MANIFEST_SHA256}" == "${CLAUDE_BINARY_MANIFEST_SHA256}" &&
+                      "${CODEX_BINARY_FILES}" == "${CLAUDE_BINARY_FILES}" &&
+                      "${CODEX_BINARY_SUMMARY}" == "${CLAUDE_BINARY_SUMMARY}" ) ) ]]; then
               binary_input_ok=true
             fi
           else
@@ -2122,6 +2185,9 @@ jobs:
                 "${claude_ok}" == "true" && "${binary_input_ok}" == "true" &&
                 "${blocking_findings}" == "0" ]]; then
             heading='### ✅ Двойное ИИ-ревью завершено без блокеров'
+            if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+              heading='### ✅ ИИ-ревью Codex завершено без блокеров; Claude отключён'
+            fi
           elif [[ "${MODE}" == "claude" && "${claude_ok}" == "true" &&
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
             heading='### ✅ Ручное ревью Claude завершено без блокеров'
@@ -2172,9 +2238,14 @@ jobs:
                   "${binary_input_ok}" == "true" && "${blocking_findings}" == "0" ]]; then
               gate_state='success'
               gate_description='Оба ревью завершены без P0–P2'
+              if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+                gate_description='Codex завершён без P0–P2; Claude отключён'
+              fi
             else
               gate_state='failure'
-              if [[ "${binary_input_ok}" != "true" ]]; then
+              if [[ "${PROFILE_CHECK:-}" != "ok" ]]; then
+                gate_description='Не удалось подтвердить профиль ревью репозитория'
+              elif [[ "${binary_input_ok}" != "true" ]]; then
                 gate_description='Не удалось подтвердить безопасный вход моделей'
               elif [[ "${blocking_findings}" != "0" ]]; then
                 gate_description='Найдены замечания P0–P2'
@@ -2192,5 +2263,9 @@ jobs:
 
           if ! pr_snapshot_is_current; then
             mark_result_stale
+            exit 1
+          fi
+          if [[ "${PROFILE_CHECK:-}" != "ok" ]]; then
+            echo "::error::${PROFILE_CHECK:-Не удалось подтвердить профиль ревью}"
             exit 1
           fi
