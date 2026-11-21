@@ -17,7 +17,7 @@ def stage_tools():
     entries = manifest.decode("ascii").splitlines()
     if not entries:
         raise ValueError("Манифест утилит пуст")
-    target = Path(tempfile.mkdtemp(prefix="review-tools-", dir=os.environ["RUNNER_TEMP"]))
+    target = Path(tempfile.mkdtemp(prefix="review-tools-", dir=Path(os.environ["RUNNER_TEMP"]).resolve()))
     try:
         for entry in entries:
             match = re.fullmatch(r"([0-9a-f]{64})  ([a-z0-9-]+\.mjs)", entry)
