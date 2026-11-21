@@ -1,0 +1,15 @@
+name: Подготовить доверенные утилиты ревью
+description: Проверяет манифест и предоставляет утилиты в REVIEW_TOOLS_DIR для текущего задания.
+inputs:
+  manifest-sha256:
+    description: SHA-256 манифеста, закреплённая в вызывающем workflow
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Проверить файлы и подготовить каталог задания
+      shell: bash
+      env:
+        REVIEW_ACTION_PATH: ${{ github.action_path }}
+        EXPECTED_MANIFEST_SHA256: ${{ inputs.manifest-sha256 }}
+      run: python3 -I "$REVIEW_ACTION_PATH/stage.py"
