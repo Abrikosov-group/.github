@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -18,8 +18,8 @@ function fixture(t) {
   return {
     root,
     envFile,
-    stage(hash) {
-      return spawnSync("python3", ["-I", join(action, "stage.py")], {
+    stage(hash, directory = action) {
+      return spawnSync("python3", ["-I", join(directory, "stage.py")], {
         cwd: root,
         encoding: "utf8",
         env: { PATH: process.env.PATH, EXPECTED_MANIFEST_SHA256: hash, RUNNER_TEMP: root, GITHUB_ENV: envFile },
@@ -42,7 +42,7 @@ test("каждый запуск получает отдельную провер
   assert.notEqual(directories[0], directories[1]);
   const expected = readdirSync(utilities).filter((name) => name.endsWith(".mjs") && !name.endsWith(".test.mjs")).sort();
   for (const dir of directories) {
-    assert.ok(dir.startsWith(root + "/"));
+    assert.ok(dir.startsWith(realpathSync(root) + "/"));
     assert.deepEqual(readdirSync(dir).sort(), expected);
     for (const name of expected) assert.deepEqual(readFileSync(join(dir, name)), readFileSync(join(utilities, name)));
   }
@@ -55,4 +55,19 @@ test("неверная сумма манифеста останавливает 
   assert.match(result.stderr, /контрольная сумма манифеста/u);
   assert.equal(readFileSync(envFile, "utf8"), "");
   assert.deepEqual(readdirSync(root), ["env"]);
+});
+
+test("изменённые байты утилиты отклоняются даже при правильной сумме манифеста", (t) => {
+  const { root, envFile, stage } = fixture(t);
+  const source = join(root, "fixture", ".github");
+  const copy = join(source, "actions", "review-tools");
+  mkdirSync(copy, { recursive: true });
+  cpSync(action, copy, { recursive: true });
+  cpSync(utilities, join(source, "review"), { recursive: true });
+  writeFileSync(join(source, "review", "prepare-codex-input.mjs"), "// changed fixture");
+  const result = stage(manifestHash, copy);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Не совпала контрольная сумма prepare-codex-input.mjs/u);
+  assert.equal(readFileSync(envFile, "utf8"), "");
+  assert.deepEqual(readdirSync(root).sort(), ["env", "fixture"]);
 });

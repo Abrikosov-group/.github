@@ -101,7 +101,7 @@ test("failed Action saves diagnostic before cleanup without changing review stat
   assert.ok(action < diagnostic && diagnostic < upload && upload < cleanup);
   const steps = workflow.slice(diagnostic, upload);
   assert.match(steps, /always\(\) && steps\.claude\.outcome == 'failure'/u);
-  assert.match(steps, /_review_infra\/\.github\/review\/claude-failure-diagnostic\.mjs/u);
+  assert.match(steps, /\$\{REVIEW_TOOLS_DIR\}\/claude-failure-diagnostic\.mjs/u);
   assert.match(workflow.slice(upload, cleanup), /always\(\) && steps\.claude\.outcome == 'failure'/u);
   assert.match(workflow.slice(upload, cleanup), /diagnostic\/failure\.json/u);
   assert.match(workflow, /show_full_output: false/u);

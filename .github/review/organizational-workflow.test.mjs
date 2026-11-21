@@ -21,6 +21,8 @@ const contributing = readFileSync("CONTRIBUTING.md", "utf8");
 const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "utf8");
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
 const organizationWorkflowSha = "b2b7c1222fbacb3889b841ea60f233f932f81482";
+const reviewToolsAction = "Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644";
+const reviewToolsDigest = "9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453";
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -97,6 +99,7 @@ function executeRunScript({
         GITHUB_STEP_SUMMARY: summaryPath,
         GITHUB_WORKSPACE: root,
         RUNNER_TEMP: root,
+        REVIEW_TOOLS_DIR: join(root, "trusted-tools"),
         MOCK_GH_LOG: ghLogPath,
         TRUSTED_WORKFLOW_REPOSITORY: "Abrikosov-group/.github",
         TRUSTED_WORKFLOW_SHA: reviewedWorkflowSha,
@@ -495,7 +498,7 @@ test("DeepSeek изолирован от подписочных ролей и н
     assert.doesNotMatch(job, /runs-on: (?:ubuntu|windows|macos)-/u);
   }
   assert.doesNotMatch(analyze, /pull-requests: write|issues: write|contents: write|CLAUDE_CODE_OAUTH_TOKEN/u);
-  assert.match(analyze, /ref: \$\{\{ inputs.trusted_workflow_sha \}\}/u);
+  assert.ok(analyze.includes("uses: " + reviewToolsAction));
   assert.doesNotMatch(analyze, /ref:.*head_sha|npm |\.\/pr-head|run-codex-review/u);
   assert.match(publish, /if: needs.analyze-deepseek.outputs.state == 'completed'/u);
   assert.doesNotMatch(publish, /DEEPSEEK_API_KEY/u);
@@ -513,7 +516,7 @@ test("повторно используемый Codex не запускаетс�
       REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", BASE_SHA: baseSha, HEAD_SHA: headSha,
       TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: "github-actions[bot]", REUSE_EXISTING_REVIEWS: "true", DEEPSEEK_ENABLED: "true",
       MOCK_PR_JSON: prFixture({ baseSha, headSha }),
-      MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 101, user: { login: "github-actions[bot]" },
+      MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 101, commit_id: headSha, user: { login: "github-actions[bot]" },
         body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}` }]]),
     },
   });
@@ -533,10 +536,7 @@ test("безопасный вход Codex строится от доказанн
   assert.match(workflow, /--base-sha "\$\{BASE_SHA\}"/u);
   assert.match(workflow, /--merge-base-sha "\$\{merge_base\}"/u);
   assert.match(workflow, /--head-sha "\$\{HEAD_SHA\}"/u);
-  assert.match(
-    prepareJob,
-    /repository: \$\{\{ inputs\.trusted_workflow_repository \}\}\n\s+ref: \$\{\{ inputs\.trusted_workflow_sha \}\}\n\s+path: _review_infra/u,
-  );
+  assert.ok(prepareJob.includes("uses: " + reviewToolsAction));
   assert.doesNotMatch(workflow, /job\.workflow_repository|job\.workflow_sha/u);
   assert.doesNotMatch(workflow, /git diff --binary/u);
   assert.match(workflow, /"\$\{merge_base\}" "\$\{HEAD_SHA\}"/u);
@@ -553,8 +553,14 @@ test("безопасный вход Codex строится от доказанн
 
 test("исполняемый организационный код закреплён полными SHA", () => {
   assert.doesNotMatch(workflow, /\n\s+ref: main\s*$/mu);
-  assert.match(workflow, /repository: \$\{\{ inputs\.trusted_workflow_repository \}\}/u);
-  assert.match(workflow, /ref: \$\{\{ inputs\.trusted_workflow_sha \}\}/u);
+  const expectedJobs = ["prepare-codex", "analyze-deepseek", "publish-deepseek", "publish-codex", "analyze-claude", "publish-claude"];
+  for (const jobId of expectedJobs) {
+    const job = extractJob(workflow, jobId);
+    assert.ok(job.includes("uses: " + reviewToolsAction));
+    assert.ok(job.includes("manifest-sha256: " + reviewToolsDigest));
+  }
+  assert.equal(workflow.split("uses: " + reviewToolsAction).length - 1, expectedJobs.length);
+  assert.doesNotMatch(workflow, /_review_infra|repository: \$\{\{ inputs\.trusted_workflow_repository/u);
   assert.doesNotMatch(workflow, /job\.workflow_repository|job\.workflow_sha/u);
   assert.match(
     caller,
@@ -661,7 +667,7 @@ test("Codex публикуется только после схемы и дов�
   assert.match(codexController, /"--output-last-message", resultPath/u);
   assert.match(workflow, /REVIEW_JSON_FILE:/u);
   assert.match(workflow, /codex-review:\$\{BASE_SHA\}:\$\{HEAD_SHA\}:\$\{CODEX_REQUESTED_MODEL\}/u);
-  assert.match(workflow, /node _review_infra\/\.github\/review\/publish-claude-review\.mjs/u);
+  assert.match(workflow, /node "\$\{REVIEW_TOOLS_DIR\}\/publish-claude-review\.mjs"/u);
 });
 
 test("Claude использует подписочный OAuth и не может перейти на API-ключ", () => {
@@ -1749,12 +1755,12 @@ test("[11] два существующих маркера не запускаю�
   const reviews = JSON.stringify([[
     {
       id: 101,
-      user: { login: "github-actions[bot]" },
+      commit_id: headSha, user: { login: "github-actions[bot]" },
       body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
     },
     {
       id: 102,
-      user: { login: "github-actions[bot]" },
+      commit_id: headSha, user: { login: "github-actions[bot]" },
       body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
     },
   ]]);
@@ -1831,12 +1837,12 @@ test("повторно использованное ревью с P0–P2 не �
   const reviews = JSON.stringify([[
     {
       id: 201,
-      user: { login: "github-actions[bot]" },
+      commit_id: headSha, user: { login: "github-actions[bot]" },
       body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n<!-- review-findings:P0=0;P1=1;P2=0 -->\n${binaryCoverageMarker()}`,
     },
     {
       id: 202,
-      user: { login: "github-actions[bot]" },
+      commit_id: headSha, user: { login: "github-actions[bot]" },
       body: `<!-- claude-review:${baseSha}:${headSha}:claude-sonnet-5 -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
     },
   ]]);
@@ -1989,7 +1995,7 @@ test("старое ревью без доверенных метрик запу�
     MOCK_REVIEWS_JSON: JSON.stringify([[
       {
         id: 301,
-        user: { login: "github-actions[bot]" },
+        commit_id: headSha, user: { login: "github-actions[bot]" },
         body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.3-codex-spark -->\n${binaryCoverageMarker()}`,
       },
     ]]),
@@ -2043,7 +2049,7 @@ test("повторяющиеся и небезопасные метрики не
           MOCK_REVIEWS_JSON: JSON.stringify([[
             {
               id: 302,
-              user: { login: "github-actions[bot]" },
+              commit_id: headSha, user: { login: "github-actions[bot]" },
               body: `${marker}\n${metrics}\n${binaryCoverageMarker()}`,
             },
           ]]),
@@ -2076,12 +2082,12 @@ test("из нескольких ручных ревью одного SHA gate б
       MOCK_REVIEWS_JSON: JSON.stringify([[
         {
           id: 401,
-          user: { login: "github-actions[bot]" },
+          commit_id: headSha, user: { login: "github-actions[bot]" },
           body: `${codexMarker}\n<!-- review-findings:P0=0;P1=1;P2=0 -->\n${binaryCoverageMarker()}`,
         },
         {
           id: 402,
-          user: { login: "github-actions[bot]" },
+          commit_id: headSha, user: { login: "github-actions[bot]" },
           body: `${codexMarker}\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}`,
         },
       ]]),
@@ -2127,7 +2133,7 @@ test("[12] любой один маркер запускает только от
       REUSE_EXISTING_REVIEWS: "true",
       MOCK_PR_JSON: prFixture({ baseSha, headSha }),
       MOCK_REVIEWS_JSON: JSON.stringify([[
-        { id: 101, user: { login: "github-actions[bot]" }, body: marker },
+        { id: 101, commit_id: headSha, user: { login: "github-actions[bot]" }, body: marker },
       ]]),
     };
     const codex = executeRunScript({
@@ -2440,12 +2446,38 @@ test("Sol повторно используется только при opt-in �
       env: { REPOSITORY: "Abrikosov-group/project", PR_NUMBER: "17", BASE_SHA: baseSha, HEAD_SHA: headSha,
         TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: "github-actions[bot]", REUSE_EXISTING_REVIEWS: "true",
         CODEX_FALLBACK_ENABLED: enabled, MOCK_PR_JSON: prFixture({ baseSha, headSha }),
-        MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 110, user: { login: "github-actions[bot]" },
+        MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 110, commit_id: headSha, user: { login: "github-actions[bot]" },
           body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.6-sol -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}\n${profile}` }]]) },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.outputs, enabled === "true" && profile ? /^needed=false$/mu : /^needed=true$/mu);
     if (enabled === "true" && profile) assert.match(result.outputs, /^review_model=gpt-5.6-sol$/mu);
+  }
+});
+
+test("повторный отзыв Opus требует издателя, commit_id и подтверждённого профиля", () => {
+  const baseSha = "a".repeat(40), headSha = "b".repeat(40);
+  const marker = `<!-- claude-review:${baseSha}:${headSha}:claude-opus-5-5 -->`;
+  const profile = "<!-- claude-profile:opus-5-5-xhigh-standard-v1 -->";
+  const body = [marker, profile, "<!-- review-findings:P0=0;P1=0;P2=0 -->", binaryCoverageMarker()].join("\n");
+  const login = "github-actions[bot]";
+  const trusted = { id: 11, user: { login }, commit_id: headSha, body };
+  for (const [review, needed] of [
+    [trusted, false],
+    [{ ...trusted, user: { login: "other" } }, true],
+    [{ ...trusted, commit_id: baseSha }, true],
+    [{ ...trusted, body: body.replace(profile, "") }, true],
+  ]) {
+    const result = executeRunScript({
+      stepName: "Не расходовать квоту повторно для того же снимка",
+      ghMock: markerGhMock,
+      env: { REPOSITORY: "Abrikosov-group/sawabook", PR_NUMBER: "17", BASE_SHA: baseSha,
+        HEAD_SHA: headSha, TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: login,
+        REUSE_EXISTING_REVIEWS: "true", CLAUDE_REVIEW_MODEL: "claude-opus-5-5",
+        BINARY_FILES: "0", MOCK_REVIEWS_JSON: JSON.stringify([[review]]) },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.outputs.includes(`needed=${needed}`), result.outputs);
   }
 });
 
@@ -2521,6 +2553,9 @@ test("Codex без Claude: публикация и reuse успешны, сбо�
     assert.doesNotMatch(result.ghLog, /✅ Claude|Оба ревью|Двойное ИИ-ревью завершено/u);
   }
   for (const changes of [
+    { REPOSITORY: "Abrikosov-group/sawabook", CLAUDE_REQUESTED_MODEL: "claude-opus-5-5" },
+    { REPOSITORY: "Abrikosov-group/sawabook", CLAUDE_ENABLED: "true", CLAUDE_REQUESTED_MODEL: "claude-opus-5-5" },
+
     { CODEX_PREPARE_RESULT: "failure" }, { CODEX_ANALYZE_RESULT: "failure" },
     { CODEX_ANALYZE_RESULT: "cancelled" }, { CODEX_PUBLISH_RESULT: "skipped" },
     { CODEX_PUBLISHED_BLOCKING_FINDINGS: "1" }, { CODEX_PUBLISHED_BLOCKING_FINDINGS: "" },

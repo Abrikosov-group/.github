@@ -751,13 +751,9 @@ jobs:
           persist-credentials: false
 
       - name: Получить доверенную утилиту подготовки входа
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Проверить дубликат и подготовить вход модели
         id: input
@@ -798,7 +794,7 @@ jobs:
           input_dir="${GITHUB_WORKSPACE}/.review-input/codex"
           mkdir -p "${input_dir}"
           preparation="$(node \
-            "${GITHUB_WORKSPACE}/_review_infra/.github/review/prepare-codex-input.mjs" \
+            "${REVIEW_TOOLS_DIR}/prepare-codex-input.mjs" \
             --base-sha "${BASE_SHA}" \
             --merge-base-sha "${merge_base}" \
             --head-sha "${HEAD_SHA}" \
@@ -849,7 +845,7 @@ jobs:
               --arg coverage_marker "${coverage_marker}" \
               --arg login "${REVIEW_PUBLISHER_LOGIN}" \
               '[.[][]? | select(
-                .user.login == $login and
+                .user.login == $login and .commit_id == env.HEAD_SHA and
                 (((.body // "") | contains($marker)) or
                   ($fallback_enabled == "true" and
                    ((.body // "") | contains($fallback_marker)) and
@@ -991,9 +987,9 @@ jobs:
           CODEX_ACCOUNT_PROFILE_ROOT: ${{ inputs.codex_profile_root }}
         run: |
           set -euo pipefail
-          cp _review_infra/.github/review/run-codex-review.mjs .review-input/codex/run-codex-review.mjs
+          cp "${REVIEW_TOOLS_DIR}/run-codex-review.mjs" .review-input/codex/run-codex-review.mjs
           if [[ -n "${CODEX_ACCOUNT_PROFILE_ROOT}" ]]; then
-            cp _review_infra/.github/review/codex-account-diagnostic.mjs .review-input/codex/codex-account-diagnostic.mjs
+            cp "${REVIEW_TOOLS_DIR}/codex-account-diagnostic.mjs" .review-input/codex/codex-account-diagnostic.mjs
           fi
 
       - name: Передать обезличенный вход ревью на защищённый Runner
@@ -1034,12 +1030,9 @@ jobs:
           test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
 
       - name: Получить доверенный контроллер DeepSeek
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
       - name: Подготовить Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1062,7 +1055,7 @@ jobs:
           FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
         run: |
           mkdir -p .review-output
-          node _review_infra/.github/review/run-deepseek-review.mjs --kind c3 --github --input .review-input/codex --output .review-output/deepseek
+          node "${REVIEW_TOOLS_DIR}/run-deepseek-review.mjs" --kind c3 --github --input .review-input/codex --output .review-output/deepseek
       - name: Сохранить отдельный результат и диагностику DeepSeek
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -1102,12 +1095,9 @@ jobs:
           test "${RUNNER_NAME}" = "${EXPECTED_RUNNER_NAME}"
 
       - name: Получить доверенный издатель DeepSeek
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
       - name: Подготовить Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1140,7 +1130,7 @@ jobs:
           DEEPSEEK_OUTPUT: ${{ github.workspace }}/.review-output/deepseek
           REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
           FORCE_REVIEW: ${{ needs.context.outputs.trigger == 'manual' || inputs.reuse_existing_reviews == false }}
-        run: node _review_infra/.github/review/publish-deepseek-review.mjs
+        run: node "${REVIEW_TOOLS_DIR}/publish-deepseek-review.mjs"
 
   analyze-codex:
     name: Проанализировать PR с Codex и разрешённым резервом
@@ -1335,13 +1325,9 @@ jobs:
           path: .review-output/codex
 
       - name: Получить доверенный издатель версии workflow
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Опубликовать атомарное ревью Codex
         id: publish
@@ -1359,7 +1345,7 @@ jobs:
           REVIEW_PUBLISHER_LOGIN: ${{ needs.start-status.outputs.publisher_login }}
         run: |
           set -euo pipefail
-          node _review_infra/.github/review/publish-claude-review.mjs
+          node "${REVIEW_TOOLS_DIR}/publish-claude-review.mjs"
 
 
   analyze-claude:
@@ -1429,13 +1415,9 @@ jobs:
           fi
 
       - name: Получить доверенную утилиту подготовки входа
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Подготовить безопасный вход
         id: input
@@ -1477,7 +1459,7 @@ jobs:
           input_dir="${GITHUB_WORKSPACE}/.review-input"
           mkdir -p "${input_dir}"
           preparation="$(node \
-            "${GITHUB_WORKSPACE}/_review_infra/.github/review/prepare-codex-input.mjs" \
+            "${REVIEW_TOOLS_DIR}/prepare-codex-input.mjs" \
             --base-sha "${BASE_SHA}" \
             --merge-base-sha "${merge_base}" \
             --head-sha "${HEAD_SHA}" \
@@ -1556,8 +1538,10 @@ jobs:
           reviews="$(gh api --paginate --slurp "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100")"
           existing="$(jq -c --arg marker "${marker}" --arg coverage_marker "${coverage_marker}" --arg login "${REVIEW_PUBLISHER_LOGIN}" \
             '[.[][]? | select(
-              .user.login == $login and
-              (.body // "" | contains($marker)) and
+              .user.login == $login and .commit_id == env.HEAD_SHA and
+              (.body // "" | startswith($marker + "\n")) and
+              (env.CLAUDE_REVIEW_MODEL != "claude-opus-5-5" or
+                (.body // "" | startswith($marker + "\n<!-- claude-profile:opus-5-5-xhigh-standard-v1 -->\n"))) and
               (.body // "" | contains($coverage_marker))
             )] | sort_by(.id) | last // null' \
             <<< "${reviews}")"
@@ -1726,7 +1710,7 @@ jobs:
           CLAUDE_DIAGNOSTIC_FILE: ${{ runner.temp }}/claude-review-${{ github.run_id }}-${{ github.run_attempt }}/diagnostic/failure.json
         run: |
           set -euo pipefail
-          node _review_infra/.github/review/claude-failure-diagnostic.mjs
+          node "${REVIEW_TOOLS_DIR}/claude-failure-diagnostic.mjs"
 
       - name: Сохранить диагностику сбоя Claude в артефакт
         if: always() && steps.claude.outcome == 'failure'
@@ -1838,13 +1822,9 @@ jobs:
           persist-credentials: false
 
       - name: Получить доверенные утилиты из организации
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: Abrikosov-group/.github/.github/actions/review-tools@4ce049754eb8359f4e4707bcc904ff88664de644
         with:
-          repository: ${{ inputs.trusted_workflow_repository }}
-          ref: ${{ inputs.trusted_workflow_sha }}
-          path: _review_infra
-          fetch-depth: 1
-          persist-credentials: false
+          manifest-sha256: 9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453
 
       - name: Получить вход, который анализировал Claude
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -1902,7 +1882,7 @@ jobs:
           trusted_input_dir="${GITHUB_WORKSPACE}/.review-input/trusted"
           mkdir -p "${trusted_input_dir}"
           node \
-            "${GITHUB_WORKSPACE}/_review_infra/.github/review/prepare-codex-input.mjs" \
+            "${REVIEW_TOOLS_DIR}/prepare-codex-input.mjs" \
             --base-sha "${BASE_SHA}" \
             --merge-base-sha "${merge_base}" \
             --head-sha "${HEAD_SHA}" \
@@ -1952,7 +1932,7 @@ jobs:
               .requested_effort == "xhigh" and .fast == false and .automatic_fallback == false
             ' "${REVIEW_PROFILE_FILE}" > /dev/null
           fi
-          node _review_infra/.github/review/publish-claude-review.mjs
+          node "${REVIEW_TOOLS_DIR}/publish-claude-review.mjs"
 
 
   finish-status:
@@ -1990,6 +1970,7 @@ jobs:
       CODEX_ANALYZE_RESULT: ${{ needs.analyze-codex.result }}
       CODEX_REVIEW_MODEL: ${{ needs.analyze-codex.outputs.review_model || needs.prepare-codex.outputs.review_model }}
       CODEX_REQUESTED_MODEL_LABEL: ${{ needs.context.outputs.codex_model_label }}
+      CLAUDE_REQUESTED_MODEL: ${{ inputs.claude_model }}
       CLAUDE_MODEL_LABEL: ${{ needs.context.outputs.claude_model_label }}
       CODEX_FALLBACK_USED: ${{ needs.analyze-codex.outputs.fallback_used }}
       CODEX_PUBLISH_RESULT: ${{ needs.publish-codex.result }}
@@ -2118,7 +2099,10 @@ jobs:
           fi
 
           claude_ok=false
-          if [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
+          if [[ "${REPOSITORY}" == "Abrikosov-group/sawabook" &&
+                ( "${CLAUDE_ENABLED:-true}" == "false" || "${CLAUDE_REQUESTED_MODEL:-}" != "claude-opus-5-5" ) ]]; then
+            claude_line='- ❌ Для Sawabook требуется отзыв Claude Opus 5.5 на текущем коммите'
+          elif [[ "${CLAUDE_ENABLED:-true}" == "false" ]]; then
             claude_ok=true
             claude_line='- ⏭ Claude — отключён (claude_enabled=false), ревью не выполнялось'
           elif [[ "${CLAUDE_ANALYZE_RESULT}" != "success" ]]; then
