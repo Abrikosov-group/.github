@@ -856,10 +856,9 @@ jobs:
               --arg login "${REVIEW_PUBLISHER_LOGIN}" \
               '[.[][]? | select(
                 .user.login == $login and .commit_id == env.HEAD_SHA and
-                (((.body // "") | contains($marker)) or
+                (((.body // "") | startswith($marker + "\n")) or
                   ($fallback_enabled == "true" and
-                   ((.body // "") | contains($fallback_marker)) and
-                   ((.body // "") | contains("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")))) and
+                   ((.body // "") | startswith($fallback_marker + "\n<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->\n")))) and
                 ((.body // "") | contains($coverage_marker))
               )] | sort_by(.id) | last // null' \
               <<< "${reviews}")"
@@ -878,7 +877,7 @@ jobs:
                 select(. <= 9007199254740991)
               ' <<< "${existing}")"; then
                 review_model="${CODEX_REQUESTED_MODEL}"
-                if jq -e --arg marker "${fallback_marker}" '(.body // "") | contains($marker)' <<< "${existing}" > /dev/null; then
+                if jq -e --arg marker "${fallback_marker}" '(.body // "") | startswith($marker + "\n")' <<< "${existing}" > /dev/null; then
                   review_model='gpt-5.6-sol'
                 fi
                 echo "review_model=${review_model}" >> "${GITHUB_OUTPUT}"

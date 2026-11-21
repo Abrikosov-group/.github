@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -22,7 +23,9 @@ const pullRequestTemplate = readFileSync(".github/pull_request_template.md", "ut
 const reviewedWorkflowSha = "ce8a887cbb97fd01afcc65384d34046431613dd9";
 const organizationWorkflowSha = "b2b7c1222fbacb3889b841ea60f233f932f81482";
 const reviewToolsAction = "Abrikosov-group/.github/.github/actions/review-tools@17e12e0ac1d20e4c8f43fc809f925dfdcdeeb78f";
-const reviewToolsDigest = "9d5dfe9f2e0f93628e9825b8bafc6abe4c8a39f98632f413da3b8ce4e5d6c453";
+const reviewToolsDigest = createHash("sha256")
+  .update(readFileSync(".github/actions/review-tools/tools.sha256"))
+  .digest("hex");
 const emptyManifestHash = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 function binaryCoverageMarker(files = 0, hash = emptyManifestHash) {
@@ -2459,6 +2462,31 @@ test("Draft opt-in сохраняет актуальный итог и пров�
   assert.match(changed.ghLog, /--raw-field state=failure/u);
 });
 
+test("Terra распознаётся по первой строке опубликованного отзыва", () => {
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const body = [
+    `<!-- codex-review:${baseSha}:${headSha}:gpt-5.6-terra -->`,
+    "<!-- review-findings:P0=0;P1=0;P2=0 -->",
+    binaryCoverageMarker(),
+  ].join("\n");
+  for (const [headerPrefix, needed] of [["", false], ["\n", true]]) {
+    const review = { id: 110, commit_id: headSha, user: { login: "github-actions[bot]" }, body: headerPrefix + body };
+    const result = executeRunScript({
+      stepName: "Проверить дубликат и подготовить вход модели", ghMock: markerGhMock,
+      commandMocks: { git: gitHeadMock, node: codexInputNodeMock },
+      env: {
+        REPOSITORY: academyRepository, PR_NUMBER: "17", BASE_SHA: baseSha, HEAD_SHA: headSha,
+        TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: review.user.login, REUSE_EXISTING_REVIEWS: "true",
+        ...academyProfile, MOCK_PR_JSON: prFixture({ baseSha, headSha, headRepository: academyRepository }),
+        MOCK_REVIEWS_JSON: JSON.stringify([[review]]),
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.outputs, new RegExp(`^needed=${needed}$`, "mu"));
+  }
+});
+
 test("Sol повторно используется только при opt-in и совпадении профиля", () => {
   const baseSha = "a".repeat(40), headSha = "b".repeat(40);
   for (const enabled of ["true", "false"]) for (const profile of ["", "<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->"]) {
@@ -2469,7 +2497,7 @@ test("Sol повторно используется только при opt-in �
         TRIGGER: "automatic", REVIEW_PUBLISHER_LOGIN: "github-actions[bot]", REUSE_EXISTING_REVIEWS: "true",
         CODEX_FALLBACK_ENABLED: enabled, MOCK_PR_JSON: prFixture({ baseSha, headSha }),
         MOCK_REVIEWS_JSON: JSON.stringify([[{ id: 110, commit_id: headSha, user: { login: "github-actions[bot]" },
-          body: `<!-- codex-review:${baseSha}:${headSha}:gpt-5.6-sol -->\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n${binaryCoverageMarker()}\n${profile}` }]]) },
+          body: [`<!-- codex-review:${baseSha}:${headSha}:gpt-5.6-sol -->`, profile, "<!-- review-findings:P0=0;P1=0;P2=0 -->", binaryCoverageMarker()].filter(Boolean).join("\n") }]]) },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.outputs, enabled === "true" && profile ? /^needed=false$/mu : /^needed=true$/mu);
