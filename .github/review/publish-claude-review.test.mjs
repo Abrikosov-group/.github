@@ -463,6 +463,34 @@ test("создаёт отдельное русское ревью GPT-5.3-Codex-
   assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, STANDARD_MODEL));
 });
 
+test("Terra публикуется как отдельная модель без маркера резерва Sol", () => {
+  const model = "gpt-5.6-terra";
+  const marker = reviewMarker(BASE_SHA, HEAD_SHA, model);
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, model);
+  assert.ok(payload.body.startsWith(marker));
+  assert.match(payload.body, /GPT-5\.6 Terra, усилие `xhigh`/u);
+  assert.doesNotMatch(payload.body, /codex-fallback-profile/u);
+  assert.notEqual(marker, reviewMarker(BASE_SHA, HEAD_SHA, SPARK_MODEL));
+});
+
+test("Opus повторно используется для точного коммита и проверенного профиля", async () => {
+  const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, DEEP_MODEL);
+  const marker = "<!-- claude-profile:opus-5-5-xhigh-standard-v1 -->";
+  assert.ok(payload.body.includes(marker));
+  for (const [sha, body, expected] of [
+    [HEAD_SHA, payload.body, false],
+    [BASE_SHA, payload.body, true],
+    [HEAD_SHA, payload.body.replace(marker, ""), true],
+  ]) {
+    const needed = await withFetch(async (url) => String(url).includes("/reviews?")
+      ? jsonResponse([{ id: 100, commit_id: sha, user: { login: "github-actions[bot]" }, body }])
+      : jsonResponse(pullRequestFixture()),
+    () => reviewNeeded({ repository: "example/sawabook", pullNumber: 55,
+      baseSha: BASE_SHA, headSha: HEAD_SHA, reviewModel: DEEP_MODEL, token: "test-token" }));
+    assert.equal(needed, expected);
+  }
+});
+
 test("резерв публикуется как Sol и переиспользуется только с согласованным профилем", async () => {
   const model = "gpt-5.6-sol";
   const payload = buildReviewPayload({ findings: [] }, BASE_SHA, HEAD_SHA, model);
@@ -474,7 +502,7 @@ test("резерв публикуется как Sol и переиспользу
     const needed = await withFetch(async () => {
       reads++;
       return reads === 1 ? jsonResponse(pullRequestFixture()) : jsonResponse([{
-        id: 100, user: { login: "github-actions[bot]" },
+        id: 100, commit_id: HEAD_SHA, user: { login: "github-actions[bot]" },
         body: `${reviewMarker(BASE_SHA, HEAD_SHA, model)}\n${findingsMarker()}\n${profile}`,
       }]);
     }, () => reviewNeeded({ repository: "example/sawabook", pullNumber: 55,
@@ -536,7 +564,7 @@ test("до запуска Claude пропускает дубликат и уст
     }
     return jsonResponse([{
       id: 10,
-      user: { login: "github-actions[bot]" },
+      commit_id: HEAD_SHA, user: { login: "github-actions[bot]" },
       body: `${marker}\n${findingsMarker()}`,
     }]);
   }, () => reviewNeeded(context));
@@ -579,7 +607,7 @@ test("до запуска Claude пропускает дубликат и уст
       return jsonResponse(currentPullRequest);
     }
     return jsonResponse([{
-      user: { login: "abrikosov-review-gate-publisher[bot]" },
+      commit_id: HEAD_SHA, user: { login: "abrikosov-review-gate-publisher[bot]" },
       id: 10,
       body: `${marker}\n${findingsMarker()}`,
     }]);
@@ -593,7 +621,7 @@ test("до запуска Claude пропускает дубликат и уст
     if (String(url).endsWith("/pulls/55")) {
       return jsonResponse(currentPullRequest);
     }
-    return jsonResponse([{ id: 11, user: { login: "github-actions[bot]" }, body: marker }]);
+    return jsonResponse([{ id: 11, commit_id: HEAD_SHA, user: { login: "github-actions[bot]" }, body: marker }]);
   }, () => reviewNeeded(context));
   assert.equal(legacyNeeded, true);
 
@@ -604,10 +632,10 @@ test("до запуска Claude пропускает дубликат и уст
     return jsonResponse([
       {
         id: 12,
-        user: { login: "github-actions[bot]" },
+        commit_id: HEAD_SHA, user: { login: "github-actions[bot]" },
         body: `${marker}\n${findingsMarker()}`,
       },
-      { id: 13, user: { login: "github-actions[bot]" }, body: marker },
+      { id: 13, commit_id: HEAD_SHA, user: { login: "github-actions[bot]" }, body: marker },
     ]);
   }, () => reviewNeeded(context));
   assert.equal(latestLegacyNeeded, true);
@@ -773,7 +801,7 @@ test("не публикует повторное ревью того же diff",
     }
     return jsonResponse([
       {
-        user: { login: "github-actions[bot]" },
+        commit_id: HEAD_SHA, user: { login: "github-actions[bot]" },
         id: 20,
         body: `${marker}\n${findingsMarker({ p1: 1 })}\n${binaryCoverageMarker()}`,
         html_url: "https://github.com/example/sawabook/pull/55#existing-review",
@@ -798,7 +826,7 @@ test("переиздаёт legacy-ревью без доверенных мет�
     if (calls.length === 2) {
       return jsonResponse([{
         id: 21,
-        user: { login: "github-actions[bot]" },
+        commit_id: HEAD_SHA, user: { login: "github-actions[bot]" },
         body: marker,
         html_url: "https://github.com/example/sawabook/pull/55#legacy-review",
       }]);
@@ -826,7 +854,7 @@ test("ручной запуск публикует новое ревью даж�
     }
     if (calls.length === 2) {
       return jsonResponse([{
-        user: { login: "abrikosov-review-gate-publisher[bot]" },
+        commit_id: HEAD_SHA, user: { login: "abrikosov-review-gate-publisher[bot]" },
         body: marker,
       }]);
     }
@@ -856,7 +884,7 @@ test("публикует Opus после Sonnet для того же diff", asyn
     if (calls.length === 2) {
       return jsonResponse([
         {
-          user: { login: "github-actions[bot]" },
+          commit_id: HEAD_SHA, user: { login: "github-actions[bot]" },
           body: standardMarker,
           html_url: "https://github.com/example/sawabook/pull/55#standard-review",
         },
@@ -949,7 +977,7 @@ test("Draft opt-in публикует оба вида ревью и не пов�
     const needed = await withFetch(async () => {
       reads++;
       if (reads === 1) return jsonResponse(pullRequestFixture({ draft: true }));
-      return jsonResponse([{ user: { login: "github-actions[bot]" }, id: 42,
+      return jsonResponse([{ commit_id: HEAD_SHA, user: { login: "github-actions[bot]" }, id: 42,
         body: `${reviewMarker(BASE_SHA, HEAD_SHA, model)}\n${findingsMarker()}\n${binaryCoverageMarker()}` }]);
     }, () => reviewNeeded({ repository: "example/sawabook", pullNumber: 55, baseSha: BASE_SHA,
       headSha: HEAD_SHA, reviewModel: model, token: "test", reviewDrafts: true, binaryManifest: binaryManifest() }));

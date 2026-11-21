@@ -3,6 +3,7 @@ name: Проверка инфраструктуры ИИ-ревью
 "on":
   pull_request:
     paths:
+      - ".github/actions/review-tools/**"
       - ".github/review/**"
       - ".github/workflows/review-all.yml"
       - ".github/workflows/review-all-trigger.yml"
@@ -16,6 +17,7 @@ name: Проверка инфраструктуры ИИ-ревью
   push:
     branches: [main]
     paths:
+      - ".github/actions/review-tools/**"
       - ".github/review/**"
       - ".github/workflows/review-all.yml"
       - ".github/workflows/review-all-trigger.yml"
@@ -45,6 +47,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Сверить тестируемые утилиты с коммитом закреплённого действия
+        shell: bash
+        run: |
+          set -euo pipefail
+          action_sha="$(sed -nE 's#^[[:space:]]*uses: Abrikosov-group/\.github/\.github/actions/review-tools@([0-9a-f]{40})$#\1#p' .github/workflows/review-all.yml | sort -u)"
+          [[ "${action_sha}" =~ ^[0-9a-f]{40}$ ]]
+          git diff --exit-code --stat "${action_sha}" HEAD -- .github/actions/review-tools '.github/review/*.mjs' ':!.github/review/*.test.mjs'
 
       - name: Подготовить Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

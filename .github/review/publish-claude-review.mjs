@@ -13,6 +13,7 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const REVIEW_FINDINGS_PATTERN = /<!-- review-findings:P0=([0-9]+);P1=([0-9]+);P2=([0-9]+) -->/gu;
 const BINARY_COVERAGE_PATTERN = /<!-- review-binary-coverage:sha256=([0-9a-f]{64});files=([0-9]+) -->/gu;
+const OPUS_PROFILE_MARKER = "<!-- claude-profile:opus-5-5-xhigh-standard-v1 -->";
 const REVIEW_MODELS = new Map([
   ["deepseek-flash", {
     displayName: "DeepSeek Flash",
@@ -36,6 +37,11 @@ const REVIEW_MODELS = new Map([
   }],
   ["gpt-5.6-sol", {
     displayName: "GPT-5.6 Sol",
+    marker: "codex-review",
+    reviewer: "Codex",
+  }],
+  ["gpt-5.6-terra", {
+    displayName: "GPT-5.6 Terra",
     marker: "codex-review",
     reviewer: "Codex",
   }],
@@ -387,6 +393,7 @@ export function buildReviewPayload(
     commit_id: headSha,
     body: [
       reviewMarker(baseSha, headSha, reviewModel),
+      ...(reviewModel === "claude-opus-5-5" ? [OPUS_PROFILE_MARKER] : []),
       ...(reviewModel === "gpt-5.6-sol" ? ["<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->"] : []),
       `<!-- review-findings:P0=${counts.P0};P1=${counts.P1};P2=${counts.P2} -->`,
       ...(binaryManifest === null
@@ -612,6 +619,8 @@ async function findExistingReview({
   repository,
   pullNumber,
   marker,
+  headSha,
+  reviewModel,
   token,
   publisherLogin = "github-actions[bot]",
 }) {
@@ -625,7 +634,10 @@ async function findExistingReview({
     for (const review of reviews) {
       if (
         review.user?.login === publisherLogin &&
-        review.body?.includes(marker) &&
+        review.commit_id === headSha &&
+        (review.body === marker || review.body?.startsWith(marker + "\n")) &&
+        (reviewModel !== "claude-opus-5-5" ||
+          review.body.startsWith([marker, OPUS_PROFILE_MARKER, ""].join("\n"))) &&
         (!marker.endsWith(":gpt-5.6-sol -->") || review.body.includes("<!-- codex-fallback-profile:sol-xhigh-standard-v1 -->")) &&
         (latestReview === null || review.id > latestReview.id)
       ) {
@@ -713,6 +725,8 @@ export async function reviewNeeded({
     repository,
     pullNumber,
     marker,
+    headSha,
+    reviewModel,
     token,
     publisherLogin,
   });
@@ -776,6 +790,8 @@ export async function main() {
     repository,
     pullNumber,
     marker,
+    headSha,
+    reviewModel,
     token,
     publisherLogin,
   });

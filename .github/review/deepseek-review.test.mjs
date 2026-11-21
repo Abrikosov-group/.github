@@ -176,7 +176,7 @@ for (const scenario of ["already_published", "closed", "changed_during_review", 
     const f = fixture(t); let generated = 0, credentials = 0, prReads = 0;
     const request = { state: "open", draft: false, base: { sha: base }, head: { sha: head } };
     t.mock.method(globalThis, "fetch", async (url) => {
-      if (url.includes("/reviews?")) return Response.json([{ id: 1, user: { login: "github-actions[bot]" }, body:
+      if (url.includes("/reviews?")) return Response.json([{ id: 1, commit_id: head, user: { login: "github-actions[bot]" }, body:
         `${reviewMarker(base, head, PROFILE.model)}\n<!-- review-findings:P0=0;P1=0;P2=0 -->\n<!-- review-binary-coverage:sha256=${sha256("[]")};files=0 -->` }]);
       prReads++;
       if (scenario === "postcheck_failed" && generated) throw new Error("synthetic API error");
